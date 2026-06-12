@@ -1,0 +1,318 @@
+/* base (landing) */
+@import "reset.css";
+@import "base.css";
+@import "grid.css";
+
+/* base (app — 13 new pages) */
+@import "base-app.css";
+
+/* landing blocks */
+@import "style/blocks.css";
+@import "style/ui.css";
+
+/* app blocks (13 new pages) */
+@import "components.css";
+@import "blocks.css";
+@import "ui-app.css";
+@import "darkmode.css";
+
+/* libs */
+@import "libs/swiper.css";
+
+/* media queries */
+@import "media.css";
+@import "media-app.css";
+
+/* landing header fixes after app imports */
+.btn,
+.btn::after {
+	border-radius: 999px;
+}
+
+.hero .header {
+	display: flex;
+	position: relative;
+	background-color: transparent;
+}
+
+.hero .header__inner {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	min-width: 0;
+	width: 100%;
+	max-width: 1240px;
+	min-height: 7.5rem;
+	padding: 1rem 3.3rem;
+	column-gap: 2.5rem;
+	background-color: #fff;
+	border-radius: 100px;
+	border: 0;
+	margin: 0 auto;
+}
+
+.hero .header__aside {
+	display: flex;
+	align-items: center;
+	justify-content: flex-end;
+	flex: 0 1 auto;
+	gap: 1rem 2rem;
+	width: auto;
+	min-width: 0;
+	min-height: 0;
+	padding: 0;
+	border: 0;
+	position: static;
+}
+
+.hero .header .logo {
+	flex-shrink: 0;
+	transform: translateY(-1px);
+}
+
+.hero .header img.logo,
+.mobile-nav img.logo,
+.footer img.logo {
+	display: block;
+	width: 14.6rem;
+	height: auto;
+	background: none;
+	object-fit: contain;
+	color: inherit;
+	font-size: inherit;
+}
+
+.hero .header .menu {
+	align-self: center;
+}
+
+.hero .header .btn {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	flex: 0 0 auto;
+	width: auto;
+	min-width: 14.5rem;
+	height: 4.2rem;
+	min-height: 0;
+	padding: 0.8rem 2.5rem;
+	border-radius: 999px;
+	font-size: 1rem;
+	line-height: 1.1;
+	white-space: nowrap;
+}
+
+.hero .hero-title-line {
+	display: block;
+}
+
+.hero .heading-1 strong {
+	display: block;
+}
+
+.hero .header .btn__inner {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	height: 100%;
+	line-height: 1;
+}
+
+.hero .header .btn__text {
+	display: block;
+	line-height: 1;
+}
+
+.hero .header .btn::after {
+	border-radius: 999px;
+}
+
+.hero .to-action .btn._big {
+	border-radius: 999px;
+}
+
+.hero .to-action .btn._big::after {
+	border-radius: 999px;
+}
+
+.hero .header .btn:hover,
+.hero .header .btn:active {
+	transform: none;
+}
+
+@media only screen and (max-width: 992px) {
+	.hero .header__inner {
+		padding-left: 2rem;
+		padding-right: 2rem;
+		column-gap: 1.5rem;
+	}
+
+	.hero .header__aside {
+		gap: 1rem;
+	}
+
+	.hero .header .btn {
+		min-width: auto;
+		padding-left: 1.7rem;
+		padding-right: 1.7rem;
+	}
+}
+
+@media only screen and (max-width: 768px) {
+	.hero__inner {
+		padding-left: 2rem;
+		padding-right: 2rem;
+	}
+
+	.hero .header__inner {
+		padding-left: 1.8rem;
+		padding-right: 2rem;
+	}
+
+	.hero .burger {
+		margin-right: 0.6rem;
+	}
+
+	.hero .header .btn {
+		padding-left: 1.4rem;
+		padding-right: 1.4rem;
+	}
+
+	.hero .hero-title-line {
+		display: inline;
+	}
+
+	.hero .hero-title-line::after {
+		content: " ";
+	}
+
+	.hero .heading-1 strong {
+		display: inline;
+	}
+}
+
+@media only screen and (max-width: 460px) {
+	.hero__inner {
+		padding-left: 1.8rem;
+		padding-right: 1.8rem;
+	}
+
+	.hero .header__inner {
+		min-height: 6.6rem;
+		padding-left: 1.6rem;
+		padding-right: 2rem;
+	}
+
+	.hero .header img.logo,
+	.mobile-nav img.logo {
+		width: 13rem;
+	}
+}
+
+/* landing tariff fixes after app imports */
+#tariff {
+	display: block;
+	width: 100%;
+	max-width: none;
+	margin: 0;
+	padding: 4rem 0;
+}
+
+#tariff .container-xl {
+	margin-left: auto;
+	margin-right: auto;
+}
+
+#tariff .tariff-tabs {
+	width: 100%;
+}
+
+#tariff .tariff-tabs__nav {
+	display: flex;
+	justify-content: center;
+	width: 100%;
+	padding-bottom: 4rem;
+}
+
+#tariff .tariff-tabs__inner {
+	display: inline-flex;
+	justify-content: center;
+	gap: 0;
+	overflow: hidden;
+	border-radius: 10rem;
+	background-color: #fff;
+	box-shadow: inset 0 0 0 1px rgba(81, 113, 208, 0.32);
+}
+
+#tariff .tariff-tabs__item {
+	position: relative;
+}
+
+#tariff .tariff-tabs__item a {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	column-gap: 1rem;
+	min-width: 23rem;
+	min-height: 6rem;
+	padding: 1rem 3rem;
+	font-size: 2.2rem;
+	font-weight: 600;
+	text-align: center;
+	text-decoration: none;
+	color: var(--black);
+	background-color: transparent;
+	border: 0;
+	border-radius: 10rem;
+	box-shadow: none;
+	outline: 0;
+	transition: 0.3s;
+}
+
+#tariff .tariff-tabs__item a:hover {
+	color: var(--primary);
+}
+
+#tariff .tariff-tabs__item.active a {
+	color: #fff;
+	background: var(--accent-gradient);
+	box-shadow: none;
+}
+
+#tariff .tariff-tabs__item.active .badge-text {
+	color: var(--accent);
+	background: #fff;
+}
+
+#tariff .row {
+	justify-content: center;
+	width: 100%;
+	margin-left: 0;
+	margin-right: 0;
+}
+
+#tariff .tariff-card {
+	border: 1px solid rgba(81, 113, 208, 0.16);
+	box-shadow: 0 1.8rem 5rem rgba(12, 41, 80, 0.08);
+}
+
+#tariff .tariff-card:not(._primary) {
+	background: #fff;
+}
+
+#tariff .tariff-card._primary {
+	border-color: rgba(255, 255, 255, 0.36);
+	box-shadow: 0 2rem 5.6rem rgba(37, 99, 235, 0.24);
+}
+
+#tariff .tariff-card .to-action .btn__icon {
+	display: none;
+}
+
+@media only screen and (max-width: 768px) {
+	#tariff .tariff-tabs__item a {
+		min-width: auto;
+		padding-left: 2.2rem;
+		padding-right: 2.2rem;
+	}
+}
