@@ -159,36 +159,59 @@
             </div>
           </div>
 
-          <div class="wizard-grid wizard-grid--single">
-            <div class="field-block">
-              <div class="field-label dark:!text-white/65">ID аккаунта Avito</div>
-              <input
-                v-model="form.avito_account_id"
-                class="wizard-input dark:!bg-[#2C2F3D] dark:!text-white/90 dark:!shadow-[inset_0_0_0_1px_rgba(255,255,255,0.1)] dark:placeholder:!text-white/40"
-                type="text"
-                inputmode="numeric"
-                placeholder="ID рекламного аккаунта Avito"
-              />
+          <div class="avito-access-grid">
+            <div class="avito-access-form">
+              <div class="field-block">
+                <div class="field-label dark:!text-white/65">ID аккаунта Avito</div>
+                <input
+                  v-model="form.avito_account_id"
+                  class="wizard-input avito-access-input dark:!bg-[#2C2F3D] dark:!text-white/90 dark:!shadow-[inset_0_0_0_1px_rgba(255,255,255,0.1)] dark:placeholder:!text-white/40"
+                  type="text"
+                  inputmode="numeric"
+                  placeholder="ID рекламного аккаунта"
+                />
+              </div>
+              <div class="field-block">
+                <div class="field-label dark:!text-white/65">Client ID</div>
+                <input
+                  v-model="form.avito_client_id"
+                  class="wizard-input avito-access-input dark:!bg-[#2C2F3D] dark:!text-white/90 dark:!shadow-[inset_0_0_0_1px_rgba(255,255,255,0.1)] dark:placeholder:!text-white/40"
+                  type="text"
+                  autocomplete="off"
+                  placeholder="Avito Client ID"
+                />
+              </div>
+              <div class="field-block">
+                <div class="field-label dark:!text-white/65">Client Secret</div>
+                <input
+                  v-model="form.avito_client_secret"
+                  class="wizard-input avito-access-input dark:!bg-[#2C2F3D] dark:!text-white/90 dark:!shadow-[inset_0_0_0_1px_rgba(255,255,255,0.1)] dark:placeholder:!text-white/40"
+                  type="password"
+                  autocomplete="new-password"
+                  placeholder="Avito Client Secret"
+                />
+              </div>
             </div>
-            <div class="field-block">
-              <div class="field-label dark:!text-white/65">Client ID</div>
-              <input
-                v-model="form.avito_client_id"
-                class="wizard-input dark:!bg-[#2C2F3D] dark:!text-white/90 dark:!shadow-[inset_0_0_0_1px_rgba(255,255,255,0.1)] dark:placeholder:!text-white/40"
-                type="text"
-                autocomplete="off"
-                placeholder="Avito Client ID"
-              />
-            </div>
-            <div class="field-block">
-              <div class="field-label dark:!text-white/65">Client Secret</div>
-              <input
-                v-model="form.avito_client_secret"
-                class="wizard-input dark:!bg-[#2C2F3D] dark:!text-white/90 dark:!shadow-[inset_0_0_0_1px_rgba(255,255,255,0.1)] dark:placeholder:!text-white/40"
-                type="password"
-                autocomplete="new-password"
-                placeholder="Avito Client Secret"
-              />
+
+            <div class="avito-cabinet-preview dark:!bg-white/5 dark:!border-white/10" :class="{ 'avito-cabinet-preview--connected': avitoConnected }">
+              <div class="avito-cabinet-preview__top">
+                <span class="avito-cabinet-preview__icon dark:!bg-white/10">
+                  <img src="/admirra/img/icons/avito.svg" alt="Avito Ads" />
+                </span>
+                <span class="avito-cabinet-preview__badge" :class="{ 'avito-cabinet-preview__badge--ready': avitoConnected }">
+                  <svg v-if="avitoConnected" width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3.5 8.5l3 3 6-7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  {{ avitoPreviewStatus }}
+                </span>
+              </div>
+              <div class="avito-cabinet-preview__body">
+                <div class="avito-cabinet-preview__label dark:!text-white/45">Рекламный кабинет</div>
+                <h5 class="dark:!text-white/90">{{ avitoPreviewTitle }}</h5>
+                <p class="dark:!text-white/55">{{ avitoPreviewDescription }}</p>
+              </div>
+              <div class="avito-cabinet-preview__meta dark:!bg-white/5">
+                <span class="dark:!text-white/45">ID кабинета</span>
+                <strong class="dark:!text-white/80">{{ avitoPreviewAccountId }}</strong>
+              </div>
             </div>
           </div>
 
@@ -197,12 +220,21 @@
             <div class="wizard-actions__right">
               <button type="button" class="ghost-btn dark:!bg-white/5 dark:!text-white/70" @click="handleCancel">Отмена</button>
               <button
+                v-if="!avitoConnected"
                 type="button"
                 class="primary-btn primary-btn--avito"
-                :disabled="loadingAuth"
+                :disabled="loadingAuth || !avitoAccessReady"
                 @click="connectAvito"
               >
                 {{ loadingAuth ? 'Подключение...' : 'Подключить Avito Ads' }}
+              </button>
+              <button
+                v-else
+                type="button"
+                class="primary-btn"
+                @click="proceedAvitoToMetrika"
+              >
+                Далее
               </button>
             </div>
           </div>
@@ -289,7 +321,7 @@
 
         <Transition name="step-expand">
           <div v-if="isStepVisible(3)" class="wizard-content">
-        <div class="wizard-panel soft-panel dark:!bg-[#2C2F3D] dark:!border dark:!border-white/10">
+        <div v-if="form.platform !== 'AVITO_ADS'" class="wizard-panel soft-panel dark:!bg-[#2C2F3D] dark:!border dark:!border-white/10">
           <div>
             <h4 class="dark:!text-white/90">Рекламные кампании</h4>
             <p class="dark:!text-white/55">Выбор РК отключен: система автоматически использует все кампании выбранного кабинета.</p>
@@ -297,7 +329,7 @@
           <div class="status-pill dark:!bg-white/5 dark:!text-white/70">{{ loadingStates.campaigns ? 'Загрузка...' : `Найдено кампаний: ${campaigns.length}` }}</div>
           </div>
 
-        <div v-if="form.platform === 'AVITO_ADS'" class="wizard-panel mt-[1.3889rem] dark:!bg-[#2C2F3D] dark:!border dark:!border-white/10">
+        <div v-if="form.platform === 'AVITO_ADS'" class="wizard-panel dark:!bg-[#2C2F3D] dark:!border dark:!border-white/10">
           <div class="panel-head">
             <div>
               <h4 class="dark:!text-white/90">Яндекс Метрика (лиды)</h4>
@@ -309,12 +341,26 @@
           <button
             v-else
             type="button"
-            class="primary-btn"
+            class="primary-btn primary-btn--inline"
             :disabled="loadingMetrikaAuth || !lastIntegrationId"
             @click="initYandexMetrikaAuth"
           >
             {{ loadingMetrikaAuth ? 'Перенаправление...' : 'Подключить Яндекс Метрику' }}
           </button>
+        </div>
+
+        <div v-if="form.platform === 'AVITO_ADS'" class="wizard-panel avito-utm-panel mt-[1.3889rem] dark:!bg-[#2C2F3D] dark:!border dark:!border-white/10">
+          <div>
+            <h4 class="dark:!text-white/90">UTM source</h4>
+            <p class="dark:!text-white/55">По этому source считаются лиды из Метрики; измените, если у клиента нестандартный source.</p>
+          </div>
+          <input
+            v-model.trim="form.utm_source"
+            type="text"
+            class="wizard-input avito-utm-input dark:!bg-[#2C2F3D] dark:!text-white/90 dark:!shadow-[inset_0_0_0_1px_rgba(255,255,255,0.1)] dark:placeholder:!text-white/40"
+            placeholder="avito-ads"
+            autocomplete="off"
+          />
         </div>
 
         <div v-if="usesMetrikaWizard" class="wizard-panel mt-[1.3889rem] dark:!bg-[#2C2F3D] dark:!border dark:!border-white/10">
@@ -323,22 +369,39 @@
               <h4 class="dark:!text-white/90">Счетчики метрики</h4>
               <p class="dark:!text-white/55">Выберите счетчики для отслеживания целей</p>
             </div>
-            <button
-              type="button"
-              class="small-btn dark:!bg-white/5 dark:!text-white/70 dark:!shadow-[inset_0_0_0_1px_rgba(255,255,255,0.12)]"
-              :disabled="loadingStates.counters || counters.length === 0"
-              @click="toggleAllCounters"
-            >
-              {{ allCountersSelected ? 'Снять все' : 'Отметить все' }}
-            </button>
+            <div class="flex items-center gap-[0.6944rem]">
+              <div v-if="counters.length > 5" class="search-wrap">
+                <input
+                  v-model="counterSearch"
+                  type="text"
+                  class="search-input dark:!bg-[#2C2F3D] dark:!text-white/95 dark:!shadow-[inset_0_0_0_1px_rgba(255,255,255,0.12)] dark:placeholder:!text-white/55"
+                  placeholder="Поиск по счётчикам"
+                />
+                <div class="search-icon-circle dark:!bg-white/10">
+                  <svg width="7" height="7" viewBox="0 0 16 16" fill="none">
+                    <circle cx="6.5" cy="6.5" r="5.5" stroke="#ababab" stroke-width="1.8"/>
+                    <path d="M10.5 10.5L14 14" stroke="#ababab" stroke-width="1.8" stroke-linecap="round"/>
+                  </svg>
+                </div>
+              </div>
+              <button
+                type="button"
+                class="small-btn dark:!bg-white/5 dark:!text-white/70 dark:!shadow-[inset_0_0_0_1px_rgba(255,255,255,0.12)]"
+                :disabled="loadingStates.counters || counters.length === 0"
+                @click="toggleAllCounters"
+              >
+                {{ counterBulkLabel }}
+              </button>
+            </div>
           </div>
 
           <div v-if="loadingStates.counters" class="empty-line dark:!text-white/55">Загрузка счетчиков...</div>
           <div v-else-if="counters.length === 0" class="empty-line dark:!text-white/55">Нет доступных счетчиков.</div>
+          <div v-else-if="counterSearch && filteredCounters.length === 0" class="empty-line dark:!text-white/55">Ничего не найдено по «{{ counterSearch }}»</div>
 
           <div v-else class="cards-grid">
             <label
-              v-for="counter in counters"
+              v-for="counter in visibleCounters"
               :key="counter.id"
               class="select-tile dark:!border-white/10 dark:!bg-white/5"
               :class="{ 'select-tile--active': selectedCounterIds.includes(counter.id) }"
@@ -355,6 +418,9 @@
               <span class="select-tile__title dark:!text-white/85">{{ counter.name }}</span>
               <span class="select-tile__meta dark:!text-white/50">ID: {{ counter.id }}</span>
             </label>
+          </div>
+          <div v-if="hiddenCounterCount > 0" class="large-list-hint dark:!text-white/55">
+            Показано {{ visibleCounters.length }} из {{ filteredCounters.length }}. Уточните поиск, чтобы быстрее выбрать нужный счётчик.
           </div>
         </div>
 
@@ -390,17 +456,18 @@
                 :disabled="loadingStates.goals || goals.length === 0"
                 @click="toggleAllGoals"
               >
-                {{ allGoalsSelected ? 'Снять все' : 'Отметить все' }}
+                {{ goalBulkLabel }}
               </button>
             </div>
           </div>
 
           <div v-if="loadingStates.goals" class="empty-line dark:!text-white/55">Загрузка целей...</div>
+          <div v-else-if="!selectedCounterIds.length && counters.length" class="empty-line dark:!text-white/55">Выберите счётчик выше, чтобы загрузить его цели.</div>
           <div v-else-if="goals.length === 0" class="empty-line dark:!text-white/55">Нет доступных целей.</div>
 
           <template v-else>
-            <div v-for="group in goalsGroupedByCounter" :key="group.counterId">
-              <div v-if="goalsGroupedByCounter.length > 1" class="flex items-center gap-[0.6944rem] px-[0.3472rem] pt-[1.3889rem] pb-[0.6944rem]">
+            <div v-for="group in visibleGoalsGroupedByCounter" :key="group.counterId">
+              <div v-if="visibleGoalsGroupedByCounter.length > 1" class="flex items-center gap-[0.6944rem] px-[0.3472rem] pt-[1.3889rem] pb-[0.6944rem]">
                 <span class="w-[0.5556rem] h-[0.5556rem] rounded-full bg-[#2563eb]"></span>
                 <span class="text-[1.1111rem] font-bold text-[#171717] dark:text-white/85">{{ group.counterName }}</span>
                 <span class="text-[0.9028rem] text-[rgba(105,105,105,0.45)] dark:text-white/35">ID: {{ group.counterId }}</span>
@@ -438,6 +505,9 @@
                   </span>
                 </label>
               </div>
+            </div>
+            <div v-if="hiddenGoalCount > 0" class="large-list-hint dark:!text-white/55">
+              Показано {{ visibleGoalCount }} из {{ filteredGoals.length }} целей. Уточните поиск, чтобы не перегружать список.
             </div>
             <div v-if="goalSearch && filteredGoals.length === 0" class="empty-line dark:!text-white/55">Ничего не найдено по «{{ goalSearch }}»</div>
           </template>
@@ -504,6 +574,11 @@
               <span class="summary-card__label dark:!text-white/50">Основная цель</span>
               <strong class="dark:!text-white/85">{{ goals.find(g => g.id === form.primary_goal_id)?.name || form.primary_goal_id }}</strong>
             </div>
+            <div v-if="form.platform === 'AVITO_ADS'" class="summary-card summary-card--green dark:!bg-white/5">
+              <span class="summary-card__icon dark:!bg-white/10">UTM</span>
+              <span class="summary-card__label dark:!text-white/50">Источник лидов</span>
+              <strong class="dark:!text-white/85">{{ form.utm_source || 'avito-ads' }}</strong>
+            </div>
             <div v-if="usesMetrikaWizard" class="summary-card summary-card--violet dark:!bg-white/5">
               <span class="summary-card__icon dark:!bg-white/10">+</span>
               <span class="summary-card__label dark:!text-white/50">Дополнительные цели</span>
@@ -559,6 +634,7 @@ import { useProjects } from '../../composables/useProjects'
 import { useIntegrationWizard } from '../../composables/useIntegrationWizard'
 import { useToaster } from '../../composables/useToaster'
 import api from '../../api/axios'
+import { trackFirstMilestone } from '@/utils/metrika'
 
 const router = useRouter()
 const { projects, currentProjectId, fetchProjects } = useProjects()
@@ -595,6 +671,21 @@ const loadingMetrikaAuth = ref(false)
 const metrikaIntegrationId = ref(null)
 const openSelect = ref(null)
 const profileSearch = ref('')
+const counterSearch = ref('')
+const suppressPlatformReset = ref(false)
+const COUNTER_RENDER_LIMIT = 120
+const GOAL_RENDER_LIMIT = 160
+const filteredCounters = computed(() => {
+  const q = counterSearch.value.trim().toLowerCase()
+  if (!q) return counters.value
+  return counters.value.filter(c =>
+    (c.name || '').toLowerCase().includes(q) ||
+    String(c.id || '').includes(q)
+  )
+})
+const visibleCounters = computed(() => filteredCounters.value.slice(0, COUNTER_RENDER_LIMIT))
+const hiddenCounterCount = computed(() => Math.max(filteredCounters.value.length - visibleCounters.value.length, 0))
+
 const goalSearch = ref('')
 
 const filteredGoals = computed(() => {
@@ -607,14 +698,16 @@ const filteredGoals = computed(() => {
   )
 })
 
-const goalsGroupedByCounter = computed(() => {
-  const list = filteredGoals.value
+const visibleGoals = computed(() => filteredGoals.value.slice(0, GOAL_RENDER_LIMIT))
+const hiddenGoalCount = computed(() => Math.max(filteredGoals.value.length - visibleGoals.value.length, 0))
+const visibleGoalCount = computed(() => visibleGoals.value.length)
+const visibleGoalsGroupedByCounter = computed(() => {
   const counterMap = {}
   for (const c of counters.value) {
     counterMap[String(c.id)] = c.name || `Счётчик ${c.id}`
   }
   const groups = new Map()
-  for (const goal of list) {
+  for (const goal of visibleGoals.value) {
     const cid = String(goal.counter_id || 'unknown')
     if (!groups.has(cid)) {
       groups.set(cid, { counterId: cid, counterName: counterMap[cid] || `Счётчик ${cid}`, goals: [] })
@@ -658,6 +751,49 @@ const allCountersSelected = computed(() =>
 const allGoalsSelected = computed(() =>
   goals.value.length > 0 && selectedGoalIds.value.length === goals.value.length
 )
+const visibleCounterIds = computed(() => visibleCounters.value.map((counter) => counter.id))
+const visibleGoalIds = computed(() => visibleGoals.value.map((goal) => goal.id))
+const visibleCountersSelected = computed(() =>
+  visibleCounterIds.value.length > 0 && visibleCounterIds.value.every((id) => selectedCounterIds.value.includes(id))
+)
+const visibleGoalsSelected = computed(() =>
+  visibleGoalIds.value.length > 0 && visibleGoalIds.value.every((id) => selectedGoalIds.value.includes(id))
+)
+const counterBulkLabel = computed(() => {
+  if (hiddenCounterCount.value > 0) return visibleCountersSelected.value ? 'Снять показанные' : 'Отметить показанные'
+  return allCountersSelected.value ? 'Снять все' : 'Отметить все'
+})
+const goalBulkLabel = computed(() => {
+  if (hiddenGoalCount.value > 0) return visibleGoalsSelected.value ? 'Снять показанные' : 'Отметить показанные'
+  return allGoalsSelected.value ? 'Снять все' : 'Отметить все'
+})
+const avitoAccessReady = computed(() =>
+  Boolean(String(form.avito_account_id || '').trim() && form.avito_client_id && form.avito_client_secret)
+)
+// Кабинет реально подключён и подтверждён (вернулось название)
+const avitoConnected = computed(() => {
+  if (!lastIntegrationId.value || form.platform !== 'AVITO_ADS') return false
+  const inputAccountId = String(form.avito_account_id || '').trim()
+  const connectedAccountId = String(form.account_id || '').trim()
+  return Boolean(inputAccountId && connectedAccountId && inputAccountId === connectedAccountId)
+})
+const avitoPreviewAccountId = computed(() =>
+  String(avitoConnected.value ? form.account_id : form.avito_account_id || '').trim() || '—'
+)
+const avitoPreviewStatus = computed(() => {
+  if (avitoConnected.value) return 'Подключён'
+  if (avitoAccessReady.value) return 'Готов к проверке'
+  return 'Ожидает данные'
+})
+const avitoPreviewTitle = computed(() => {
+  if (avitoConnected.value) return form.account_name || `Avito ${avitoPreviewAccountId.value}`
+  return 'Рекламный кабинет Avito'
+})
+const avitoPreviewDescription = computed(() => {
+  if (avitoConnected.value) return 'Кабинет подтверждён. Нажмите «Далее», чтобы выбрать Метрику и цели для лидов.'
+  if (avitoAccessReady.value) return 'Данные заполнены. Нажмите «Подключить», чтобы проверить доступ к кабинету.'
+  return 'Введите ID аккаунта, Client ID и Client Secret — справа появится название кабинета.'
+})
 
 const filteredProfiles = computed(() => {
   const q = profileSearch.value.trim().toLowerCase()
@@ -697,12 +833,27 @@ watch(
 )
 
 onMounted(async () => {
+  suppressPlatformReset.value = true
   const platformQuery = router.currentRoute.value.query.platform
+  const resumeId = router.currentRoute.value.query.resume_integration_id
+  const startStep = router.currentRoute.value.query.initial_step
+  const metrikaConnected = router.currentRoute.value.query.metrika_connected === '1'
+  const isResuming = Boolean(resumeId || metrikaConnected)
+
+  if (isResuming) {
+    // Возврат из OAuth Метрики — восстанавливаем состояние Avito-флоу
+    restoreAvitoWizardState()
+  } else {
+    // Новый визард — сбрасываем залежавшееся состояние от прошлой брошенной
+    // попытки (form/lastIntegrationId — module-level синглтоны), иначе превью
+    // Avito показывает старый кабинет ещё до ввода данных.
+    resetStore()
+    try { localStorage.removeItem(AVITO_WIZARD_STATE_KEY) } catch (e) {}
+  }
+
   if (platformQuery === 'YANDEX_DIRECT' || platformQuery === 'VK_ADS' || platformQuery === 'AVITO_ADS') {
     form.platform = platformQuery
   }
-
-  restoreAvitoWizardState()
 
   await fetchProjects()
 
@@ -715,17 +866,25 @@ onMounted(async () => {
     isNewProject.value = false
   }
 
-  if (localStorage.getItem('metrika_integration_id')) {
-    metrikaIntegrationId.value = localStorage.getItem('metrika_integration_id')
+  // resumeId / metrikaConnected уже определены выше.
+  // Привязку Метрики восстанавливаем ТОЛЬКО при возобновлении флоу.
+  // Для нового визарда чистим залежавшийся metrika_integration_id от прошлой
+  // (отменённой/брошенной) попытки — иначе на шаге 3 Avito ложно показывает
+  // «Метрика подключена», но счётчики/цели пустые.
+  if (resumeId) {
+    if (localStorage.getItem('metrika_integration_id')) {
+      metrikaIntegrationId.value = localStorage.getItem('metrika_integration_id')
+    }
+  } else {
+    try { localStorage.removeItem('metrika_integration_id') } catch (e) {}
+    metrikaIntegrationId.value = null
   }
-
-  // Проверяем, есть ли resumption после OAuth-редиректа
-  const resumeId = router.currentRoute.value.query.resume_integration_id
-  const startStep = router.currentRoute.value.query.initial_step
-  const metrikaConnected = router.currentRoute.value.query.metrika_connected === '1'
 
   if (resumeId) {
     lastIntegrationId.value = resumeId
+    // Дублируем в localStorage — чтобы кнопка «Подключить» на шаге 4 не теряла
+    // интеграцию, если query-параметр пропадёт (перезагрузка/навигация).
+    try { localStorage.setItem('wizard_integration_id', String(resumeId)) } catch (e) {}
     const s = parseInt(startStep) || 2
     await fetchIntegration(resumeId)
     await resolveMetrikaIntegrationId()
@@ -735,13 +894,17 @@ onMounted(async () => {
       await fetchCampaigns(resumeId)
       if (usesMetrikaWizard.value && (metrikaIntegrationId.value || metrikaConnected)) {
         await fetchCounters(resumeId)
-        await fetchGoals(resumeId)
+        // Цели грузим только если счётчики авто-выбраны (мало). При большом числе
+        // счётчиков пользователь выбирает сам — цели подтянет вотчер.
+        if (selectedCounterIds.value.length) await fetchGoals(resumeId)
       }
     } else if (s >= 2) {
       step.value = 2
       fetchProfiles(resumeId)
     }
   }
+  await nextTick()
+  suppressPlatformReset.value = false
 })
 
 watch(isNewProject, (val) => {
@@ -788,6 +951,40 @@ const selectProfile = (cabinet) => {
   form.agency_client_login = cabinet.login
 }
 
+watch(
+  () => form.platform,
+  (platform, previousPlatform) => {
+    if (suppressPlatformReset.value) return
+    if (!previousPlatform || platform === previousPlatform) return
+    error.value = null
+    profileSearch.value = ''
+    counterSearch.value = ''
+    goalSearch.value = ''
+    metrikaIntegrationId.value = null
+    lastIntegrationId.value = null
+    form.account_id = null
+    form.account_name = ''
+    form.agency_client_login = ''
+    form.utm_source = 'avito-ads'
+    form.primary_goal_id = null
+    form.avito_account_id = ''
+    form.avito_client_id = ''
+    form.avito_client_secret = ''
+    campaigns.value = []
+    selectedCampaignIds.value = []
+    counters.value = []
+    selectedCounterIds.value = []
+    goals.value = []
+    selectedGoalIds.value = []
+    profiles.value = []
+    try {
+      localStorage.removeItem('wizard_integration_id')
+      localStorage.removeItem('metrika_integration_id')
+      localStorage.removeItem(AVITO_WIZARD_STATE_KEY)
+    } catch (e) {}
+  }
+)
+
 const goToStep3 = async () => {
   if (!form.account_id) return
   try {
@@ -812,12 +1009,12 @@ const goToStep3 = async () => {
     }
     if (metrikaIntegrationId.value || form.platform === 'YANDEX_DIRECT') {
       await fetchCounters(lastIntegrationId.value)
-      await fetchGoals(lastIntegrationId.value)
+      if (selectedCounterIds.value.length) await fetchGoals(lastIntegrationId.value)
     }
   }
 }
 
-const goToStep4 = async () => {
+const goToStep4 = () => {
   if (usesMetrikaWizard.value) {
     if (form.platform === 'AVITO_ADS' && !metrikaIntegrationId.value) {
       error.value = 'Подключите Яндекс Метрику (OAuth) на шаге счётчиков'
@@ -827,7 +1024,8 @@ const goToStep4 = async () => {
       error.value = 'Выберите хотя бы один счетчик'
       return
     }
-    await fetchGoals(lastIntegrationId.value)
+    // Цели уже загружены на шаге 3 (и обновляются вотчером при смене счётчиков).
+    // Повторный await fetchGoals здесь при большом числе целей блокировал переход.
   }
   error.value = null
   step.value = 4
@@ -901,7 +1099,18 @@ const initVKAuth = async () => {
 }
 
 const doFinish = async () => {
-  if (!lastIntegrationId.value) return
+  // Восстанавливаем ID из localStorage, если он потерялся в памяти
+  // (перезагрузка/навигация после OAuth) — иначе кнопка молча не работала.
+  if (!lastIntegrationId.value) {
+    try {
+      const stored = localStorage.getItem('wizard_integration_id')
+      if (stored) lastIntegrationId.value = stored
+    } catch (e) {}
+  }
+  if (!lastIntegrationId.value) {
+    toaster.error('Не удалось определить интеграцию. Начните подключение заново.')
+    return
+  }
   loadingStates.finish = true
   error.value = null
   try {
@@ -921,9 +1130,14 @@ const doFinish = async () => {
         primary_goal_id: form.primary_goal_id,
         selected_goals: [...selectedGoalIds.value],
       }),
+      ...(form.platform === 'AVITO_ADS' && {
+        utm_source: form.utm_source || 'avito-ads',
+      }),
       is_active: true
     })
     localStorage.removeItem('metrika_integration_id')
+    // Цель «Подключён первый кабинет» — только при первом подключении на аккаунт
+    trackFirstMilestone('integration_connected', 'integration_connected')
     toaster.success('Интеграция успешно настроена!')
     resetStore()
     router.push('/integrations')
@@ -936,17 +1150,31 @@ const doFinish = async () => {
 
 const resolveMetrikaIntegrationId = async () => {
   if (metrikaIntegrationId.value) return
-  const stored = localStorage.getItem('metrika_integration_id')
-  if (stored) {
-    metrikaIntegrationId.value = stored
-    return
-  }
   try {
     const { data } = await api.get('integrations/')
-    const metrika = data.find(i => i.platform === 'YANDEX_METRIKA' && i.client_id === form.client_id)
+    const stored = localStorage.getItem('metrika_integration_id')
+    // Доверяем сохранённому id ТОЛЬКО если эта Метрика реально принадлежит
+    // текущему проекту — иначе Метрика от другого (например Яндекс) проекта
+    // ложно показалась бы подключённой в Avito-флоу.
+    const storedBelongsToClient = stored && data.some(
+      (i) => String(i.id) === String(stored)
+        && i.platform === 'YANDEX_METRIKA'
+        && String(i.client_id) === String(form.client_id)
+    )
+    if (storedBelongsToClient) {
+      metrikaIntegrationId.value = stored
+      return
+    }
+    const metrika = data.find(
+      (i) => i.platform === 'YANDEX_METRIKA' && String(i.client_id) === String(form.client_id)
+    )
     if (metrika) {
       metrikaIntegrationId.value = metrika.id
       localStorage.setItem('metrika_integration_id', metrika.id)
+    } else {
+      // У этого проекта Метрики нет — убираем возможный чужой/залежавшийся id
+      try { localStorage.removeItem('metrika_integration_id') } catch (e) {}
+      metrikaIntegrationId.value = null
     }
   } catch (e) {
     console.warn('Failed to resolve Metrika integration', e)
@@ -964,6 +1192,7 @@ const saveAvitoWizardState = () => {
     avito_account_id: form.avito_account_id,
     account_id: form.account_id,
     agency_client_login: form.agency_client_login,
+    utm_source: form.utm_source,
     integration_id: lastIntegrationId.value
   }))
 }
@@ -979,6 +1208,7 @@ const restoreAvitoWizardState = () => {
     if (state.avito_account_id) form.avito_account_id = state.avito_account_id
     if (state.account_id) form.account_id = state.account_id
     if (state.agency_client_login) form.agency_client_login = state.agency_client_login
+    if (state.utm_source) form.utm_source = state.utm_source
     if (state.integration_id && !lastIntegrationId.value) {
       lastIntegrationId.value = state.integration_id
     }
@@ -1037,6 +1267,12 @@ const handleConnectClick = async () => {
   }
 }
 
+const proceedAvitoToMetrika = () => {
+  // Данные кабинета/кампаний уже загружены в connectAvito — просто переходим
+  step.value = 3
+  scrollToStep(3)
+}
+
 const connectAvito = async () => {
   if (!form.avito_account_id || !String(form.avito_account_id).trim()) {
     error.value = 'Укажите ID рекламного аккаунта Avito'
@@ -1064,21 +1300,21 @@ const connectAvito = async () => {
       throw new Error('Сервер не вернул integration_id')
     }
     lastIntegrationId.value = data.integration_id
+    try { localStorage.setItem('wizard_integration_id', String(data.integration_id)) } catch (e) {}
     if (data.client_id) form.client_id = data.client_id
     if (data.account_id) form.account_id = data.account_id
-    toaster.success('Avito Ads подключён!')
+    if (data.account_name) form.account_name = data.account_name
+    toaster.success('Кабинет Avito подключён')
     await fetchIntegration(data.integration_id)
     await fetchCampaigns(data.integration_id)
     allFromProfile.value = true
     await resolveMetrikaIntegrationId()
-    if (!metrikaIntegrationId.value) {
-      toaster.warning('Подключите Яндекс Метрику для отслеживания лидов Avito')
-    } else {
+    if (metrikaIntegrationId.value) {
       await fetchCounters(data.integration_id)
-      await fetchGoals(data.integration_id)
+      if (selectedCounterIds.value.length) await fetchGoals(data.integration_id)
     }
-    step.value = 3
-    scrollToStep(3)
+    // Не перескакиваем сразу на шаг 3 — показываем подтверждённый кабинет
+    // (название «ИП …») в превью справа, пользователь жмёт «Далее».
   } catch (err) {
     const msg = err?.response?.data?.detail || err.message || 'Ошибка подключения Avito'
     error.value = msg
@@ -1090,19 +1326,26 @@ const connectAvito = async () => {
 
 const toggleAllCounters = () => {
   if (!counters.value.length) return
-  if (allCountersSelected.value) {
-    selectedCounterIds.value = []
+  const ids = hiddenCounterCount.value > 0 ? visibleCounterIds.value : counters.value.map(c => c.id)
+  if (!ids.length) return
+  if (ids.every((id) => selectedCounterIds.value.includes(id))) {
+    selectedCounterIds.value = selectedCounterIds.value.filter((id) => !ids.includes(id))
   } else {
-    selectedCounterIds.value = counters.value.map(c => c.id)
+    selectedCounterIds.value = Array.from(new Set([...selectedCounterIds.value, ...ids]))
+    if (hiddenCounterCount.value > 0) {
+      toaster.info('Отмечены только показанные счётчики. Уточните поиск, чтобы выбрать остальные.')
+    }
   }
 }
 
 const toggleAllGoals = () => {
   if (!goals.value.length) return
-  if (allGoalsSelected.value) {
-    selectedGoalIds.value = []
+  const ids = hiddenGoalCount.value > 0 ? visibleGoalIds.value : goals.value.map(g => g.id)
+  if (!ids.length) return
+  if (ids.every((id) => selectedGoalIds.value.includes(id))) {
+    selectedGoalIds.value = selectedGoalIds.value.filter((id) => !ids.includes(id))
   } else {
-    selectedGoalIds.value = goals.value.map(g => g.id)
+    selectedGoalIds.value = Array.from(new Set([...selectedGoalIds.value, ...ids]))
   }
 }
 
@@ -1219,6 +1462,149 @@ const toggleGoalSelection = (id) => {
 }
 .wizard-grid--single {
   grid-template-columns: minmax(0, 1fr);
+}
+.avito-access-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  align-items: stretch;
+  gap: 1.6667rem;
+}
+@media (max-width: 56.25rem) {
+  .avito-access-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .avito-access-input {
+    max-width: none;
+  }
+}
+.avito-access-form {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 1.0417rem;
+}
+.avito-access-input {
+  max-width: 22.2222rem;
+}
+.avito-utm-panel {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(13.8889rem, 19.4444rem);
+  align-items: center;
+  gap: 1.3889rem;
+}
+.avito-utm-input {
+  width: 100%;
+  max-width: 19.4444rem;
+}
+@media (max-width: 48rem) {
+  .avito-utm-panel {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .avito-utm-input {
+    max-width: none;
+  }
+}
+.avito-cabinet-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 1.0417rem;
+  padding: 1.5278rem;
+  border: 1px solid rgba(15, 23, 42, 0.07);
+  border-radius: 1.25rem;
+  background: #fbfcfe;
+  box-shadow: 0 0.1389rem 0.5556rem rgba(15, 23, 42, 0.03);
+  transition: border-color 0.25s, box-shadow 0.25s;
+}
+.avito-cabinet-preview--connected {
+  border-color: rgba(5, 150, 105, 0.35);
+  box-shadow: 0 0.4861rem 1.4rem rgba(5, 150, 105, 0.1);
+  background: #f7fdfb;
+}
+.avito-cabinet-preview__top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.8333rem;
+}
+.avito-cabinet-preview__icon {
+  display: flex;
+  width: 2.9167rem;
+  height: 2.9167rem;
+  align-items: center;
+  justify-content: center;
+  border-radius: 0.8333rem;
+  background: #fff;
+  border: 1px solid rgba(15, 23, 42, 0.06);
+}
+.avito-cabinet-preview__icon img {
+  width: 1.8056rem;
+  height: 1.8056rem;
+  object-fit: contain;
+}
+.avito-cabinet-preview__badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3472rem;
+  min-height: 1.9444rem;
+  padding: 0.3472rem 0.7639rem;
+  border-radius: 999px;
+  background: rgba(105, 105, 105, 0.08);
+  color: rgba(105, 105, 105, 0.7);
+  font-size: 0.7292rem;
+  font-weight: 700;
+}
+.avito-cabinet-preview__badge--ready {
+  background: rgba(5, 150, 105, 0.12);
+  color: #047857;
+}
+.avito-cabinet-preview__body {
+  flex: 1 1 auto;
+}
+.avito-cabinet-preview__label {
+  margin-bottom: 0.4167rem;
+  color: rgba(105, 105, 105, 0.5);
+  font-size: 0.7292rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.avito-cabinet-preview h5 {
+  color: #171717;
+  font-size: 1.1806rem;
+  font-weight: 700;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+.avito-cabinet-preview p {
+  margin-top: 0.5556rem;
+  color: rgba(105, 105, 105, 0.6);
+  font-size: 0.8681rem;
+  font-weight: 500;
+  line-height: 1.4;
+}
+.avito-cabinet-preview__meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-top: auto;
+  padding: 0.8333rem 1.0417rem;
+  border-radius: 0.8333rem;
+  background: #fff;
+  border: 1px solid rgba(15, 23, 42, 0.05);
+}
+.avito-cabinet-preview__meta span {
+  color: rgba(105, 105, 105, 0.5);
+  font-size: 0.7639rem;
+  font-weight: 600;
+}
+.avito-cabinet-preview__meta strong {
+  min-width: 0;
+  color: #171717;
+  font-size: 0.9028rem;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+  text-align: right;
 }
 .wizard-panel {
   display: flex;
@@ -1443,6 +1829,10 @@ const toggleGoalSelection = (id) => {
   background: linear-gradient(270deg, #06b5d4 0.35%, #1f9de4 32.08%, #2563eb 96.51%);
   color: #fff;
 }
+.primary-btn--inline {
+  /* Внутри wizard-panel (flex-column) кнопка иначе растягивается на всю ширину */
+  align-self: flex-start;
+}
 .primary-btn--vk {
   background: linear-gradient(135deg, #0077ff, #005fcc);
 }
@@ -1603,6 +1993,13 @@ const toggleGoalSelection = (id) => {
   padding: 1.3889rem 0;
   color: rgba(105, 105, 105, 0.56);
   font-size: 0.9028rem;
+}
+.large-list-hint {
+  margin-top: 0.8333rem;
+  color: rgba(105, 105, 105, 0.62);
+  font-size: 0.8333rem;
+  font-weight: 600;
+  line-height: 1.4;
 }
 .cards-grid {
   display: grid;
@@ -1994,8 +2391,13 @@ const toggleGoalSelection = (id) => {
 }
 @media (max-width: 767.25px) {
   .wizard-grid,
+  .avito-access-grid,
   .summary-grid {
     grid-template-columns: 1fr;
+  }
+  .avito-access-form,
+  .avito-access-input {
+    max-width: none;
   }
   .panel-head {
     align-items: flex-start;

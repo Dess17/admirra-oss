@@ -101,12 +101,23 @@
                   <span class="status-badge" :class="syncBadgeClass(item.sync_status)" :title="item.error_message || ''">
                     {{ syncLabel(item.sync_status) }}
                   </span>
+                  <span
+                    v-if="isAvitoIntegration(item)"
+                    class="metrika-source-badge"
+                    title="Лиды и цели Avito берутся из выбранного счётчика Яндекс Метрики"
+                  >
+                    <img src="/admirra/img/integrations/yandex-metrika.png" alt="" />
+                    Метрика
+                  </span>
                 </div>
 
                 <div class="sync-meta-grid">
                   <div>
                     <div class="sync-meta-label">Последняя синхронизация</div>
-                    <div class="sync-meta-value">{{ formatSyncDate(item.last_sync_at) }}</div>
+                    <div class="sync-meta-value">
+                      {{ formatSyncDate(item.last_sync_at) }}
+                      <span v-if="item.last_sync_trigger === 'auto'" class="sync-auto-badge" title="Выполнена ночным автосинхроном">авто</span>
+                    </div>
                   </div>
                   <div>
                     <div class="sync-meta-label">Следующая</div>
@@ -145,22 +156,24 @@
                 </svg>
                 <span>{{ syncingId === item.id || isSyncingIntegration(item.id) ? 'Синхронизация…' : 'Синхронизировать сейчас' }}</span>
               </button>
-              <button class="configure-btn" @click="openSettings(item)">Настроить</button>
+              <button class="configure-btn" :class="{ 'configure-btn--active': isPanelOpenFor(item) }" @click="toggleSettings(item)">{{ isPanelOpenFor(item) ? 'Свернуть' : 'Настроить' }}</button>
             </div>
           </div>
         </div>
       </div>
-      <!-- Panel inside grid, positioned below the clicked card -->
+      <!-- Panel inside grid, positioned below the clicked card, card width -->
       <div
         v-if="settingsOpen && selectedIntegration"
         :style="panelWrapperStyle"
       >
-        <IntegrationSettingsPanel
-          :integration="selectedIntegration"
-          @close="settingsOpen = false"
-          @save="saveIntegrationSettings"
-          @delete="deleteIntegration"
-        />
+        <div :style="{ gridColumn: String(panelColumn) }">
+          <IntegrationSettingsPanel
+            :integration="selectedIntegration"
+            @close="closeSettings"
+            @save="saveIntegrationSettings"
+            @delete="deleteIntegration"
+          />
+        </div>
       </div>
     </div>
 
@@ -168,7 +181,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, nextTick } from 'vue'
+import { ref, computed, onMounted, nextTick, watch } from 'vue'
 import api from '../../api/axios'
 import { useProjects } from '../../composables/useProjects'
 import { useToaster } from '../../composables/useToaster'
@@ -193,20 +206,39 @@ const selectedIndex = ref(-1)
 const syncingId = ref(null)
 
 const panelWrapperStyle = ref({})
+const panelColumn = ref(1)
+
+const isPanelOpenFor = (item) => settingsOpen.value && selectedIntegration.value?.id === item.id
 
 const openSettings = async (item) => {
   selectedIntegration.value = item
   const idx = filteredIntegrations.value.indexOf(item)
   selectedIndex.value = idx
   const cols = window.innerWidth >= 1280 ? 2 : 1
+  // Панель занимает свою строку под кликнутой карточкой, но шириной в одну карточку
+  // (в той же колонке, что и карточка) — для этого вкладываем сетку внутрь.
+  panelColumn.value = (idx % cols) + 1
   panelWrapperStyle.value = {
     gridColumn: '1 / -1',
     gridRow: String(Math.floor(idx / cols) + 2),
+    display: 'grid',
+    gridTemplateColumns: cols === 2 ? 'repeat(2, minmax(0, 1fr))' : '1fr',
+    gap: '1.0417rem',
   }
   settingsOpen.value = true
   await nextTick()
   const cardEl = document.querySelector(`[data-int-id="${item.id}"]`)
   if (cardEl) cardEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+}
+
+const closeSettings = () => {
+  settingsOpen.value = false
+  selectedIntegration.value = null
+}
+
+const toggleSettings = (item) => {
+  if (isPanelOpenFor(item)) closeSettings()
+  else openSettings(item)
 }
 
 // ── Platform definitions ──
@@ -220,6 +252,7 @@ const platformCatalog = [
 ]
 const visiblePlatformIds = new Set(['YANDEX_DIRECT', 'VK_ADS', 'AVITO_ADS'])
 const platforms = platformCatalog.filter((platform) => visiblePlatformIds.has(platform.id))
+const hiddenIntegrationPlatformIds = new Set(['YANDEX_METRIKA'])
 
 // ── API ──
 const fetchIntegrations = async () => {
@@ -240,6 +273,13 @@ const fetchIntegrations = async () => {
 
 onMounted(fetchIntegrations)
 
+// Смена проекта в хедере — перезагружаем список без перезагрузки страницы
+watch(currentProjectId, () => {
+  closeSettings()
+  search.value = ''
+  fetchIntegrations()
+})
+
 const filteredIntegrations = computed(() => {
   if (!search.value.trim()) return integrations.value
   const q = search.value.toLowerCase()
@@ -251,10 +291,15 @@ const filteredIntegrations = computed(() => {
 })
 
 const normalizeIntegrations = (data) => {
-  if (Array.isArray(data)) return data
-  if (Array.isArray(data?.results)) return data.results
-  if (Array.isArray(data?.items)) return data.items
-  return []
+  const list = Array.isArray(data)
+    ? data
+    : Array.isArray(data?.results)
+      ? data.results
+      : Array.isArray(data?.items)
+        ? data.items
+        : []
+
+  return list.filter((item) => !hiddenIntegrationPlatformIds.has(normalizePlatform(item?.platform)))
 }
 
 const normalizePlatform = (platform) => {
@@ -311,6 +356,9 @@ const platformIcon = (platform) => {
   return p?.icon || '/admirra/img/icons/yandex-direct.png'
 }
 
+const isAvitoIntegration = (integration) =>
+  normalizePlatform(integration?.platform) === 'AVITO_ADS'
+
 const syncClass = (status) => ({
   'sync-dot--success': status === 'SUCCESS',
   'sync-dot--danger':  status === 'FAILED',
@@ -340,22 +388,33 @@ const formatSyncDate = (dateStr) => {
   return `${day}, ${time} МСК`
 }
 
+// Автосинхронизация — фиксированный ночной cron (см. AUTO_SYNC_HOUR_MSK в automation/main.py).
+// Следующий синк не зависит от ручных запусков — это всегда ближайшее 03:00 МСК.
+const AUTO_SYNC_HOUR_MSK = 3
+const MSK_OFFSET_MS = 3 * 60 * 60 * 1000 // Москва стабильно UTC+3, без перехода на летнее время
+
 const formatNextSync = (item) => {
   if (!item.auto_sync) return 'авто выключено'
-  if (!item.last_sync_at) return 'после первой синхронизации'
-  const interval = Number(item.sync_interval || 1440)
-  const lastSync = new Date(item.last_sync_at)
-  if (Number.isNaN(lastSync.getTime())) return '—'
-  const nextSync = new Date(lastSync.getTime() + interval * 60 * 1000)
+
   const now = new Date()
-  const tomorrow = new Date(now)
-  tomorrow.setDate(now.getDate() + 1)
+  // «Стенные» часы МСК = UTC + 3ч; берём дату в этой системе
+  const mskNow = new Date(now.getTime() + MSK_OFFSET_MS)
+  const y = mskNow.getUTCFullYear()
+  const m = mskNow.getUTCMonth()
+  const d = mskNow.getUTCDate()
+  // 03:00 МСК сегодня как реальный UTC-момент
+  let targetUtc = Date.UTC(y, m, d, AUTO_SYNC_HOUR_MSK, 0, 0) - MSK_OFFSET_MS
+  if (targetUtc <= now.getTime()) {
+    // окно сегодня уже прошло — берём завтра
+    targetUtc = Date.UTC(y, m, d + 1, AUTO_SYNC_HOUR_MSK, 0, 0) - MSK_OFFSET_MS
+  }
+  const nextSync = new Date(targetUtc)
   const time = nextSync.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Moscow' })
 
-  if (nextSync.toDateString() === now.toDateString()) return `сегодня ~${time} МСК`
-  if (nextSync.toDateString() === tomorrow.toDateString()) return `завтра ~${time} МСК`
-  const day = nextSync.toLocaleDateString('ru-RU', { day: '2-digit', month: 'short', timeZone: 'Europe/Moscow' }).replace('.', '')
-  return `${day} ~${time} МСК`
+  const todayMskDay = mskNow.getUTCDate()
+  const nextMskDay = new Date(nextSync.getTime() + MSK_OFFSET_MS).getUTCDate()
+  if (nextMskDay === todayMskDay) return `сегодня, ${time} МСК`
+  return `завтра, ${time} МСК`
 }
 
 const formatAutoSyncText = (item) => {
@@ -380,7 +439,7 @@ const syncNow = async (item) => {
   if (syncingId.value || isSyncingIntegration(item.id)) return
   syncingId.value = item.id
   try {
-    const data = await startIntegrationSync(item.id, { days: 90 })
+    const data = await startIntegrationSync(item.id, { days: 90, forceFull: false })
     const jobId = data?.job_id
     toaster.info('Синхронизация запущена. Данные обновятся автоматически.')
     await fetchIntegrations()
@@ -743,6 +802,34 @@ const deleteIntegration = async () => {
 .status-badge--warning { background: #fff7ed; color: #c2410c; }
 .status-badge--muted { background: #f1f3f5; color: #697386; }
 
+.metrika-source-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3472rem;
+  min-height: 1.5278rem;
+  padding: 0.2083rem 0.625rem 0.2083rem 0.3472rem;
+  border-radius: 999px;
+  background: #fff9e8;
+  color: #80662d;
+  border: 1px solid rgba(242, 190, 60, 0.35);
+  font-size: 0.6944rem;
+  font-weight: 700;
+  line-height: 1;
+  white-space: nowrap;
+}
+.metrika-source-badge img {
+  width: 0.9028rem;
+  height: 0.9028rem;
+  object-fit: contain;
+  border-radius: 50%;
+}
+:global(.dark) .metrika-source-badge,
+:global(.darkmode) .metrika-source-badge {
+  background: rgba(255, 249, 232, 0.08);
+  color: #f1d28b;
+  border-color: rgba(242, 190, 60, 0.24);
+}
+
 .sync-meta-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(8.3333rem, 1fr));
@@ -761,6 +848,19 @@ const deleteIntegration = async () => {
   font-size: 0.9028rem;
   font-weight: 650;
   line-height: 1.25;
+}
+.sync-auto-badge {
+  display: inline-block;
+  margin-left: 0.3472rem;
+  padding: 0.0694rem 0.3472rem;
+  border-radius: 0.4167rem;
+  background: rgba(37, 99, 235, 0.08);
+  color: #2563eb;
+  font-size: 0.6944rem;
+  font-weight: 700;
+  vertical-align: middle;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
 }
 
 .auto-sync-line {
@@ -849,6 +949,8 @@ const deleteIntegration = async () => {
 }
 .configure-btn:hover  { background-color: #dbeafe; border-color: #2563eb; color: #1d4ed8; transform: scale(1.02); }
 .configure-btn:active { transform: scale(0.97); transition: transform 0s; }
+.configure-btn--active { background-color: #2563eb; border-color: #2563eb; color: #fff; }
+.configure-btn--active:hover { background-color: #1d4ed8; border-color: #1d4ed8; color: #fff; }
 :global(.dark) .configure-btn,
 :global(.darkmode) .configure-btn {
   background-color: rgba(255,255,255,0.06);

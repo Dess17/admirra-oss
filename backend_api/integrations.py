@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, Body
 from sqlalchemy.orm import Session
 from core.database import get_db, SessionLocal
 from core import models, schemas, security
-from automation.yandex_direct import YandexDirectAPI
+from automation.yandex_direct import YandexDirectAPI, organization_name_from_client, cabinet_display_name
 from automation.yandex_metrica import YandexMetricaAPI
 from automation.vk_ads import (
     VKAdsAPI,
@@ -67,6 +67,19 @@ MYTARGET_TOKEN_URL = cfg.oauth.mytarget_token_url
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/integrations", tags=["Integrations"])
+
+
+def _clean_metrika_target_account(value: Optional[str]) -> Optional[str]:
+    """Return a real Yandex login for Metrika filters, never an internal project id."""
+    account = str(value or "").strip()
+    if not account:
+        return None
+    if account.lower() in {"unknown", "none"}:
+        return None
+    # Internal public project/account ids like porg-24tk76ez are not Yandex logins.
+    if account.lower().startswith("porg-"):
+        return None
+    return account
 
 
 def _resolve_avito_credentials(
@@ -1124,6 +1137,7 @@ async def connect_avito_ads(
         or (profile_match.get("name") if profile_match else None)
         or f"Avito {avito_account_id}"
     )
+    utm_source = str(payload.get("utm_source") or "avito-ads").strip() or "avito-ads"
 
     db_integration = db.query(models.Integration).filter(
         models.Integration.client_id == db_client.id,
@@ -1140,6 +1154,8 @@ async def connect_avito_ads(
         db_integration.platform_client_secret = encrypted_client_secret
         db_integration.account_id = str(inferred_account_id) if inferred_account_id else None
         db_integration.account_name = inferred_account_name or credential_type
+        if not db_integration.utm_source:
+            db_integration.utm_source = utm_source
         db_integration.sync_status = models.IntegrationSyncStatus.NEVER
         db_integration.error_message = None
     else:
@@ -1152,6 +1168,7 @@ async def connect_avito_ads(
             platform_client_secret=encrypted_client_secret,
             account_id=str(inferred_account_id) if inferred_account_id else None,
             account_name=inferred_account_name or credential_type,
+            utm_source=utm_source,
             sync_status=models.IntegrationSyncStatus.NEVER,
         )
         db.add(db_integration)
@@ -1489,9 +1506,10 @@ async def get_integration_profiles(
             seen_logins = set()
 
             # ARCHITECTURE: One Yandex account (email) can have access to multiple advertising profiles
-            # 1. Personal advertising account
-            # 2. Agency clients (if this is an agency account)
-            # 3. Managed accounts (accounts where user has Editor/Manager role)
+            # 1. Personal — Clients.get (без Client-Login)
+            # 2. Agency clients — AgencyClients.get
+            # 3. Shared cabinets — ManagedLogins* + Clients.get с Client-Login и OrganizationFieldNames
+            #    * ManagedLogins не в enum FieldNames, но API возвращает при запросе
 
             # 1. Always include the personal account itself
             # Get personal advertising account login via Clients.get API
@@ -1519,8 +1537,13 @@ async def get_integration_profiles(
                 logger.warning(f"⚠️ Using account_id as fallback for personal login: {personal_login} (this may not be the correct advertising account login)")
             
             if personal_login and personal_login.lower() != "unknown":
-                personal_info = clients_info[0].get("ClientInfo", "") if clients_info else ""
-                personal_name = personal_info if personal_info else f"Личный аккаунт ({personal_login})"
+                personal_client = clients_info[0] if clients_info else {}
+                personal_name = cabinet_display_name(
+                    organization_name_from_client(personal_client),
+                    personal_client.get("ClientInfo", ""),
+                    personal_login,
+                    "Личный аккаунт",
+                )
                 profiles.append({"login": personal_login, "name": personal_name, "type": "personal"})
                 seen_logins.add(personal_login.lower())
                 logger.info(f"✅ Added personal profile: {personal_login} ({personal_name})")
@@ -1541,8 +1564,8 @@ async def get_integration_profiles(
             except Exception as agency_err:
                 logger.warning(f"No agency clients found or error: {agency_err}")
 
-            # 3. Try to get managed logins (accounts with shared access)
-            # For each managed login, fetch ClientInfo (human-readable cabinet name) via Clients.get
+            # 3. Кабинеты с делегированным доступом (ManagedLogins — недокументированное поле API).
+            # Имя: Organization.Name через Clients.get + Client-Login (документация Clients.get).
             try:
                 direct_api = YandexDirectAPI(access_token)
                 clients_info_managed = await direct_api.get_clients() or []
@@ -1554,19 +1577,18 @@ async def get_integration_profiles(
                             managed_logins_to_fetch.append(m_login)
                             seen_logins.add(m_login.lower())
 
-                # Fetch ClientInfo for each managed login (human-readable cabinet name)
                 for m_login in managed_logins_to_fetch:
-                    info = await direct_api.get_client_info_for_login(m_login)
-                    cabinet_name = info.get("ClientInfo", "").strip() if info else ""
-                    display_name = cabinet_name if cabinet_name else f"Доступный аккаунт ({m_login})"
+                    profile_info = await direct_api.get_cabinet_profile_for_login(m_login)
+                    org_name = profile_info.get("organization_name", "").strip() if profile_info else ""
+                    display_name = org_name if org_name else f"Кабинет ({m_login})"
                     profiles.append({
                         "login": m_login,
                         "name": display_name,
-                        "type": "managed"
+                        "type": "managed",
                     })
-                    logger.info(f"Added managed login: {m_login} ({display_name})")
+                    logger.info(f"Added shared cabinet: {m_login} ({display_name})")
             except Exception as managed_err:
-                logger.warning(f"Error fetching managed logins: {managed_err}")
+                logger.warning(f"Error fetching shared cabinets: {managed_err}")
 
             # Fallback if nothing found
             if not profiles:
@@ -1702,6 +1724,7 @@ async def get_integration_counters(
             return {"counters": [], "warning": "Подключите Яндекс Метрику (OAuth) для выбора счётчиков лидов"}
         access_token = security.decrypt_token(metrika_src.access_token)
         target_account = _metrika_profile_login(metrika_src)
+    target_account = _clean_metrika_target_account(target_account)
 
     if integration.platform in (
         models.IntegrationPlatform.YANDEX_DIRECT,
@@ -1859,7 +1882,29 @@ async def get_integration_counters(
                             })
                     except Exception as fallback_err:
                         logger.error(f"Fallback counter fetch also failed: {fallback_err}")
-    
+
+    # Avito: если профиль Метрики не резолвится (target_account=None) — Priority 2
+    # пропускается и блок счётчиков остаётся пустым, хотя цели грузятся через свой
+    # фолбэк. Тянем все доступные счётчики без фильтра по профилю.
+    # СТРОГО для AVITO_ADS — Яндекс.Директ сюда не попадает.
+    if not counters_list and integration.platform == models.IntegrationPlatform.AVITO_ADS:
+        logger.info("🟢 Avito: счётчики пусты, грузим все доступные без фильтра по профилю")
+        from automation.yandex_metrica import YandexMetricaAPI
+        avito_metrica_api = YandexMetricaAPI(access_token)
+        try:
+            all_avito_counters = await avito_metrica_api.get_counters()
+            for counter in all_avito_counters:
+                counters_list.append({
+                    "id": str(counter.get('id')),
+                    "name": counter.get('name', 'Unknown'),
+                    "site": counter.get('site', ''),
+                    "owner_login": counter.get('owner_login', ''),
+                    "source": "avito_all",
+                })
+            logger.info(f"🟢 Avito: загружено {len(counters_list)} счётчиков без фильтра по профилю")
+        except Exception as e:
+            logger.error(f"Avito counters (all) fetch failed: {e}")
+
     logger.info(f"✅ Returning {len(counters_list)} counters for integration {integration_id}")
     return {"counters": counters_list}
 
@@ -1949,6 +1994,7 @@ async def get_integration_goals(
         else:
             target_account = None
             logger.info(f"No profile selected, not filtering Metrika counters (will show all accessible)")
+    target_account = _clean_metrika_target_account(target_account)
     
     # CRITICAL: Priority order for goal fetching:
     # 1. If counter_ids provided, fetch goals ONLY from those counters (highest priority)
@@ -2870,9 +2916,12 @@ async def discover_campaigns(
             selected_profile = integration.agency_client_login
         elif integration.account_id and integration.account_id.lower() != "unknown":
             selected_profile = integration.account_id
+        selected_profile = _clean_metrika_target_account(selected_profile)
         if not selected_profile:
-            logger.error(f"❌ discover_campaigns: integration {integration_id} has no profile (agency_client_login or account_id). Cannot fetch campaigns correctly.")
-            raise HTTPException(status_code=400, detail="Для интеграции не задан логин рекламного профиля. Пере настройте интеграцию и выберите профиль.")
+            logger.warning(
+                f"⚠️ discover_campaigns: integration {integration_id} has no valid Yandex profile. "
+                "Trying without Client-Login."
+            )
         
         use_client_login = selected_profile
         logger.info(
@@ -3650,7 +3699,11 @@ async def delete_integration(
             models.YandexGroups.client_id == client_id,
             models.YandexGroups.campaign_name.in_(campaign_names)
         ).delete(synchronize_session=False)
-        logger.info(f"🗑️ Deleted {deleted_keywords} YandexKeywords and {deleted_groups} YandexGroups for integration {integration_id}")
+        deleted_ads = db.query(models.YandexAds).filter(
+            models.YandexAds.client_id == client_id,
+            models.YandexAds.campaign_name.in_(campaign_names)
+        ).delete(synchronize_session=False)
+        logger.info(f"🗑️ Deleted {deleted_keywords} YandexKeywords, {deleted_groups} YandexGroups and {deleted_ads} YandexAds for integration {integration_id}")
     
     deleted_goals = db.query(models.MetrikaGoals).filter(
         models.MetrikaGoals.integration_id == integration_id
@@ -3686,7 +3739,8 @@ async def delete_integration(
 
 async def get_agency_clients(access_token: str) -> List[dict]:
     """
-    Fetch list of sub-clients from Yandex Agency Account using AgencyClients service.
+    Список клиентов агентства через AgencyClients.get.
+    Документация: https://yandex.ru/dev/direct/doc/ru/agencyclients/get
     """
     url = "https://api.direct.yandex.com/json/v5/agencyclients"
     headers = {
@@ -3694,14 +3748,14 @@ async def get_agency_clients(access_token: str) -> List[dict]:
         "Accept-Language": "ru"
     }
     
-    # Request all clients
     payload = {
         "method": "get",
         "params": {
             "SelectionCriteria": {
-                "Archived": "NO" # Only active clients
+                "Archived": "NO"
             },
             "FieldNames": ["Login", "ClientInfo", "RepresentedBy"],
+            "OrganizationFieldNames": ["Name"],
             "Page": {
                 "Limit": 10000 
             }
@@ -3717,7 +3771,12 @@ async def get_agency_clients(access_token: str) -> List[dict]:
                     return [
                         {
                             "login": c["Login"],
-                            "name": c.get("ClientInfo", c["Login"]).strip() or c["Login"],
+                            "name": cabinet_display_name(
+                                organization_name_from_client(c),
+                                c.get("ClientInfo", ""),
+                                c["Login"],
+                                "Клиент агентства",
+                            ),
                             "fio": c.get("RepresentedBy", {}).get("Agency", ""),
                             "type": "agency_client"
                         }

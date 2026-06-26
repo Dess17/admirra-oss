@@ -7,8 +7,42 @@
 VAT_RATE = 1.22
 
 
-def _with_vat(value) -> float:
-    return float(value or 0) * VAT_RATE
+def _is_avito_platform(value) -> bool:
+    return str(value or "").strip().lower() in {"avito", "avito_ads"}
+
+
+def _campaign_platform(campaign: dict) -> str:
+    platform = campaign.get("platform") or campaign.get("channel")
+    if platform:
+        return str(platform)
+    name = str(campaign.get("name") or campaign.get("campaign_name") or "").lower()
+    if name.startswith("[avito]") or name.startswith("[авито]"):
+        return "avito"
+    return ""
+
+
+def _with_channel_vat(value, platform=None) -> float:
+    raw = float(value or 0)
+    return raw if _is_avito_platform(platform) else raw * VAT_RATE
+
+
+def _with_cost_breakdown_vat(value, cost_by_platform: dict | None, platform=None) -> float:
+    if isinstance(cost_by_platform, dict):
+        return (
+            float(cost_by_platform.get("yandex") or 0) * VAT_RATE
+            + float(cost_by_platform.get("vk") or 0) * VAT_RATE
+            + float(cost_by_platform.get("avito") or 0)
+        )
+    return _with_channel_vat(value, platform)
+
+
+def _summary_platform(data: dict, campaigns: list) -> str:
+    platform = data.get("platform") or data.get("channel")
+    if platform:
+        return str(platform)
+    if campaigns and all(_is_avito_platform(_campaign_platform(c)) for c in campaigns):
+        return "avito"
+    return ""
 
 
 def _escape_html(text: str) -> str:
@@ -92,12 +126,14 @@ def render_report_html(data: dict) -> str:
     end_date = data.get("end_date", "")
     generated_at = data.get("generated_at", "")
 
-    expenses = _with_vat(s.get("expenses", 0))
+    summary_platform = _summary_platform(data, tc)
+
+    expenses = _with_cost_breakdown_vat(s.get("expenses", 0), s.get("cost_by_platform"), summary_platform)
     impressions = int(s.get("impressions", 0))
     clicks = int(s.get("clicks", 0))
     leads = int(s.get("leads", 0))
-    cpc = _with_vat(s.get("cpc", 0))
-    cpa = _with_vat(s.get("cpa", 0))
+    cpc = expenses / clicks if clicks > 0 else _with_channel_vat(s.get("cpc", 0), summary_platform)
+    cpa = expenses / leads if leads > 0 else _with_channel_vat(s.get("cpa", 0), summary_platform)
 
     kpi_html = "".join([
         _kpi_card("expenses", "Расходы", f"{_fmt(expenses)} ₽", "За период"),
@@ -111,12 +147,13 @@ def render_report_html(data: dict) -> str:
     campaigns_rows = ""
     for i, c in enumerate(tc[:10]):
         name = _escape_html(c.get("name", c.get("campaign_name", "—")))
+        c_platform = _campaign_platform(c)
         conv = int(c.get("conversions", 0))
-        cost = _fmt(_with_vat(c.get("cost", 0)))
+        cost = _fmt(_with_channel_vat(c.get("cost", 0), c_platform))
         impr = _fmt(int(c.get("impressions", 0)))
         clk = _fmt(int(c.get("clicks", 0)))
-        c_cpc = _fmt(_with_vat(c.get("cpc", 0)), 2)
-        c_cpa = _fmt(_with_vat(c.get("cpa", 0)), 2) if conv else "—"
+        c_cpc = _fmt(_with_channel_vat(c.get("cpc", 0), c_platform), 2)
+        c_cpa = _fmt(_with_channel_vat(c.get("cpa", 0), c_platform), 2) if conv else "—"
         tint = _ROW_TINTS[i % len(_ROW_TINTS)]
         bg = _ROW_BACKGROUNDS[tint]
         campaigns_rows += (
@@ -160,6 +197,66 @@ def render_report_html(data: dict) -> str:
     </div>"""
 
     project_line = f'<div class="header-project">{_escape_html(client_name)}</div>' if client_name else ""
+
+    # Опциональный блок «Динамика по месяцам» (Phase 3 — opt-in, помесячно).
+    dynamics_html = ""
+    dyn_periods = (data.get("dynamics") or {}).get("periods") or []
+    if dyn_periods:
+        points = []
+        has_incomplete = False
+        for p in dyn_periods:
+            cost = _with_cost_breakdown_vat(p.get("cost", 0), p.get("cost_by_platform"))
+            leads = int(p.get("leads", 0) or 0)
+            cpl = cost / leads if leads > 0 else 0
+            incomplete = bool(p.get("incomplete"))
+            if incomplete:
+                has_incomplete = True
+            points.append({
+                "label": _escape_html(p.get("label", "")),
+                "cost": cost,
+                "leads": leads,
+                "cpl": cpl,
+                "incomplete": incomplete,
+            })
+
+        chart_w, chart_h = 820, 235
+        pad_l, pad_r, pad_t, pad_b = 42, 22, 18, 70
+        plot_w = chart_w - pad_l - pad_r
+        plot_h = chart_h - pad_t - pad_b
+        max_cost = max([pt["cost"] for pt in points] + [1])
+        step = plot_w / max(len(points), 1)
+        bar_w = min(70, step * 0.55)
+        bars = ""
+        for i, pt in enumerate(points):
+            h = max(4, pt["cost"] / max_cost * plot_h)
+            x = pad_l + i * step + (step - bar_w) / 2
+            y = pad_t + plot_h - h
+            fill = "#3464F3" if not pt["incomplete"] else "#9DB7FF"
+            dash = ' stroke="#3464F3" stroke-dasharray="4 4"' if pt["incomplete"] else ""
+            bars += (
+                f'<rect x="{x:.1f}" y="{y:.1f}" width="{bar_w:.1f}" height="{h:.1f}" rx="8" fill="{fill}"{dash}/>'
+                f'<text x="{x + bar_w / 2:.1f}" y="{pad_t + plot_h + 22}" text-anchor="middle" font-size="11" fill="#64748b">{pt["label"]}</text>'
+                f'<text x="{x + bar_w / 2:.1f}" y="{pad_t + plot_h + 39}" text-anchor="middle" font-size="10" fill="#94a3b8">{pt["leads"]} лид.</text>'
+                f'<text x="{x + bar_w / 2:.1f}" y="{pad_t + plot_h + 55}" text-anchor="middle" font-size="10" fill="#94a3b8">CPL {_fmt(pt["cpl"], 0)} ₽</text>'
+            )
+        note = (
+            '<div style="font-size:11px;color:#94a3b8;margin-top:8px;">* — текущий период ещё не завершён</div>'
+            if has_incomplete else ""
+        )
+        dynamics_html = f"""
+    <div class="panel campaigns-panel">
+      <h2>Динамика по месяцам</h2>
+      <svg width="100%" viewBox="0 0 {chart_w} {chart_h}" role="img" aria-label="Тренд динамики по месяцам">
+        <rect x="0" y="0" width="{chart_w}" height="{chart_h}" rx="18" fill="#f8fafc"/>
+        <line x1="{pad_l}" y1="{pad_t + plot_h}" x2="{chart_w - pad_r}" y2="{pad_t + plot_h}" stroke="#e2e8f0"/>
+        {bars}
+      </svg>
+      <div style="display:flex;gap:12px;align-items:center;margin-top:10px;color:#64748b;font-size:12px;">
+        <span style="display:inline-flex;width:10px;height:10px;border-radius:4px;background:#3464F3;"></span>
+        <span>Столбцы показывают расход, подписи — лиды и CPL по периоду.</span>
+      </div>
+      {note}
+    </div>"""
 
     return f"""<!DOCTYPE html>
 <html lang="ru">
@@ -346,6 +443,7 @@ def render_report_html(data: dict) -> str:
 
     {comment_html}
     {campaigns_html}
+    {dynamics_html}
 
     <div class="report-footer">
       Сформировано {generated_at}

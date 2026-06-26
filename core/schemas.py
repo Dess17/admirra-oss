@@ -1,8 +1,19 @@
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import BaseModel, EmailStr, Field, field_validator, field_serializer
 from typing import Optional, List, Any
 from uuid import UUID
-from datetime import datetime
+from datetime import datetime, timezone
 import json
+
+
+def _serialize_utc(dt: Optional[datetime]) -> Optional[str]:
+    """Naive-значения last_sync_at хранятся в UTC (datetime.utcnow()).
+    Отдаём ISO с явной зоной +00:00, иначе фронт парсит их как локальное время
+    и показывает на 3 часа раньше (UTC вместо МСК)."""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.isoformat()
 
 class UserBase(BaseModel):
     email: EmailStr
@@ -75,6 +86,7 @@ class UserResponse(UserBase):
 class Token(BaseModel):
     access_token: str
     token_type: str
+    is_new_user: Optional[bool] = None
 
 
 class OAuthAuthorizeUrlResponse(BaseModel):
@@ -275,6 +287,7 @@ class IntegrationBase(BaseModel):
     sync_interval: Optional[int] = 1440
     selected_goals: Optional[List[str]] = None # List of goal IDs
     primary_goal_id: Optional[str] = None
+    utm_source: Optional[str] = None
 
     @field_validator('selected_goals', mode='before')
     @classmethod
@@ -317,6 +330,7 @@ class IntegrationResponse(IntegrationBase):
     campaigns: List["CampaignResponse"] = []
     sync_status: Optional[str] = None  # SUCCESS | FAILED | PENDING | NEVER
     last_sync_at: Optional[datetime] = None
+    last_sync_trigger: Optional[str] = None  # auto | manual | None
     error_message: Optional[str] = None
 
     @field_validator('selected_counters', mode='before')
@@ -328,6 +342,10 @@ class IntegrationResponse(IntegrationBase):
             except:
                 return []
         return v
+
+    @field_serializer('last_sync_at')
+    def _ser_last_sync_at(self, v):
+        return _serialize_utc(v)
 
     class Config:
         from_attributes = True
@@ -422,6 +440,9 @@ class ClientResponse(ClientBase):
     created_at: datetime
     integrations: List[IntegrationResponse] = []
     summary: Optional[StatsSummary] = None
+    # Сколько всего проектов у владельца после создания (для целей Метрики
+    # project_created / second_project — дедупликация «первого раза»).
+    owner_project_count: Optional[int] = None
 
     @field_validator("status", mode="before")
     @classmethod
@@ -710,16 +731,27 @@ class DynamicsStat(BaseModel):
 
 class CampaignStat(BaseModel):
     id: Optional[str] = None
+    parent_id: Optional[str] = None
+    platform: Optional[str] = None
+    level: Optional[str] = "campaign"
+    source_id: Optional[str] = None
+    has_children: bool = False
+    hierarchy_unavailable: bool = False
+    hierarchy_unavailable_reason: Optional[str] = None
+    conversions_attributed: bool = True
+    conversions_estimated: bool = False
     name: str
     impressions: int
     clicks: int
     cost: float
-    conversions: int
+    conversions: Optional[int] = 0
+    ctr: float = 0
     cpc: float
     cpa: float
     trend_cost: Optional[float] = None
     trend_impressions: Optional[float] = None
     trend_clicks: Optional[float] = None
+    trend_ctr: Optional[float] = None
     trend_conversions: Optional[float] = None
     trend_cpc: Optional[float] = None
     trend_cpa: Optional[float] = None
@@ -774,6 +806,11 @@ class DashboardIntegrationStatus(BaseModel):
     balance: Optional[float] = None
     currency: Optional[str] = None
     last_sync_at: Optional[datetime] = None
+    last_sync_trigger: Optional[str] = None  # auto | manual | None
+
+    @field_serializer('last_sync_at')
+    def _ser_last_sync_at(self, v):
+        return _serialize_utc(v)
 
 class SyncRequest(BaseModel):
     days: int = 7
@@ -839,6 +876,21 @@ class BillingSubscriptionResponse(BaseModel):
     autorenew: bool = True
     payment_method: Optional[Any] = None
     whitelabel_available: bool = False
+
+
+class MetrikaIdentityRequest(BaseModel):
+    """ClientID Метрики и yclid, собранные на фронте — для серверных конверсий."""
+    client_id: Optional[str] = None
+    yclid: Optional[str] = None
+
+
+class MetrikaMilestoneRequest(BaseModel):
+    """Заявка на «веху» Метрики (дедупликация цели «первого раза»)."""
+    name: str
+
+
+class MetrikaMilestoneResponse(BaseModel):
+    first: bool
 
 
 class BillingSubscribeRequest(BaseModel):

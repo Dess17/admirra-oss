@@ -27,7 +27,7 @@ class User(Base):
     
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     email = Column(String, unique=True, index=True, nullable=False)
-    username = Column(String, unique=True, index=True, nullable=True) # Temporarily nullable for migration
+    username = Column(String, index=True, nullable=True)  # отображаемое имя, НЕ уникально (логин — по email)
     first_name = Column(String, nullable=True)
     last_name = Column(String, nullable=True)
     phone = Column(String, nullable=True)
@@ -78,6 +78,14 @@ class User(Base):
     brand_pdf_signature = Column(String, nullable=True)
     brand_custom_domain = Column(String, nullable=True)
     brand_domain_status = Column(String(16), nullable=True, default="none")
+
+    # Яндекс.Метрика: идентификаторы для серверных офлайн-конверсий (счётчик 109911357).
+    # Собираются на фронте при регистрации/входе и привязываются к аккаунту.
+    metrika_client_id = Column(String, nullable=True)
+    metrika_yclid = Column(String, nullable=True)
+    # Достигнутые «вехи» Метрики (JSON-список), для дедупликации целей «первого
+    # раза» (integration_connected и т.п.) на стороне сервера.
+    ym_milestones = Column(Text, nullable=True)
 
     clients = relationship("Client", back_populates="owner")
     subscriptions = relationship("Subscription", back_populates="user", cascade="all, delete-orphan")
@@ -244,8 +252,11 @@ class Client(Base):
     yandex_stats = relationship("YandexStats", back_populates="client")
     yandex_keywords = relationship("YandexKeywords", back_populates="client")
     yandex_groups = relationship("YandexGroups", back_populates="client")
+    yandex_ads = relationship("YandexAds", back_populates="client")
     vk_stats = relationship("VKStats", back_populates="client")
     avito_stats = relationship("AvitoStats", back_populates="client")
+    avito_groups = relationship("AvitoGroups", back_populates="client")
+    avito_creatives = relationship("AvitoCreatives", back_populates="client")
     weekly_reports = relationship("WeeklyReport", back_populates="client")
     monthly_reports = relationship("MonthlyReport", back_populates="client")
     team_accesses = relationship("TeamMemberProject", back_populates="project", cascade="all, delete-orphan")
@@ -333,6 +344,8 @@ class Integration(Base):
     vk_user_id = Column(String, nullable=True) # VK Ads user_id for token revocation (optional)
     sync_status = Column(Enum(IntegrationSyncStatus), default=IntegrationSyncStatus.NEVER)
     last_sync_at = Column(DateTime)
+    # 'auto' — последний синк выполнен ночным планировщиком; 'manual' — пользователем; NULL — неизвестно/старые записи
+    last_sync_trigger = Column(String(16), nullable=True)
     error_message = Column(String)
     
     # Sync settings
@@ -349,6 +362,7 @@ class Integration(Base):
     
     # Metrika Counters Support (for Direct integrations)
     selected_counters = Column(String, nullable=True) # JSON list of counter IDs
+    utm_source = Column(String, nullable=True) # For hybrid channels like Avito Ads + Metrika leads
     
     # Balance Support
     balance = Column(Numeric(10, 2), nullable=True) # Account balance in platform currency
@@ -386,8 +400,12 @@ class Campaign(Base):
 
     integration = relationship("Integration", back_populates="campaigns")
     yandex_stats = relationship("YandexStats", back_populates="campaign")
+    yandex_groups = relationship("YandexGroups", back_populates="campaign")
+    yandex_ads = relationship("YandexAds", back_populates="campaign")
     vk_stats = relationship("VKStats", back_populates="campaign")
     avito_stats = relationship("AvitoStats", back_populates="campaign")
+    avito_groups = relationship("AvitoGroups", back_populates="campaign")
+    avito_creatives = relationship("AvitoCreatives", back_populates="campaign")
 
 
 class ProjectDirection(Base):
@@ -497,6 +515,7 @@ class YandexKeywords(Base):
     
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     client_id = Column(UUID(as_uuid=True), ForeignKey("clients.id", ondelete="CASCADE"), index=True)
+    campaign_id = Column(UUID(as_uuid=True), ForeignKey("campaigns.id", ondelete="CASCADE"), nullable=True, index=True)
     date = Column(Date, index=True, nullable=False)
     campaign_name = Column(String)
     keyword = Column(String)
@@ -511,9 +530,11 @@ class YandexGroups(Base):
     __tablename__ = "yandex_groups"
     
     id = Column(BigInteger, primary_key=True, autoincrement=True)
-    client_id = Column(UUID(as_uuid=True), ForeignKey("clients.id", ondelete="CASCADE"))
+    client_id = Column(UUID(as_uuid=True), ForeignKey("clients.id", ondelete="CASCADE"), index=True)
+    campaign_id = Column(UUID(as_uuid=True), ForeignKey("campaigns.id", ondelete="CASCADE"), nullable=True, index=True)
     date = Column(Date, index=True, nullable=False)
     campaign_name = Column(String)
+    group_id = Column(String, nullable=True, index=True)
     group_name = Column(String)
     impressions = Column(BigInteger, default=0)
     clicks = Column(BigInteger, default=0)
@@ -521,6 +542,27 @@ class YandexGroups(Base):
     conversions = Column(BigInteger, default=0)
 
     client = relationship("Client", back_populates="yandex_groups")
+    campaign = relationship("Campaign", back_populates="yandex_groups")
+
+
+class YandexAds(Base):
+    __tablename__ = "yandex_ads"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    client_id = Column(UUID(as_uuid=True), ForeignKey("clients.id", ondelete="CASCADE"), index=True)
+    campaign_id = Column(UUID(as_uuid=True), ForeignKey("campaigns.id", ondelete="CASCADE"), nullable=True, index=True)
+    date = Column(Date, index=True, nullable=False)
+    campaign_name = Column(String)
+    group_id = Column(String, nullable=True, index=True)
+    group_name = Column(String, nullable=True)
+    ad_id = Column(String, nullable=True, index=True)
+    impressions = Column(BigInteger, default=0)
+    clicks = Column(BigInteger, default=0)
+    cost = Column(Numeric(20, 2), default=0)
+    conversions = Column(BigInteger, default=0)
+
+    client = relationship("Client", back_populates="yandex_ads")
+    campaign = relationship("Campaign", back_populates="yandex_ads")
 
 class AvitoStats(Base):
     __tablename__ = "avito_stats"
@@ -539,6 +581,49 @@ class AvitoStats(Base):
 
     client = relationship("Client", back_populates="avito_stats")
     campaign = relationship("Campaign", back_populates="avito_stats")
+
+
+class AvitoGroups(Base):
+    __tablename__ = "avito_groups"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    client_id = Column(UUID(as_uuid=True), ForeignKey("clients.id", ondelete="CASCADE"), index=True)
+    campaign_id = Column(UUID(as_uuid=True), ForeignKey("campaigns.id", ondelete="CASCADE"), nullable=True, index=True)
+    date = Column(Date, index=True, nullable=False)
+    campaign_name = Column(String)
+    group_id = Column(String, nullable=True, index=True)
+    group_name = Column(String, nullable=True)
+    impressions = Column(BigInteger, default=0)
+    clicks = Column(BigInteger, default=0)
+    cost = Column(Numeric(20, 2), default=0)
+    conversions = Column(BigInteger, default=0)
+    cpc = Column(Numeric(20, 2), nullable=True)
+    cpa = Column(Numeric(20, 2), nullable=True)
+
+    client = relationship("Client", back_populates="avito_groups")
+    campaign = relationship("Campaign", back_populates="avito_groups")
+
+
+class AvitoCreatives(Base):
+    __tablename__ = "avito_creatives"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    client_id = Column(UUID(as_uuid=True), ForeignKey("clients.id", ondelete="CASCADE"), index=True)
+    campaign_id = Column(UUID(as_uuid=True), ForeignKey("campaigns.id", ondelete="CASCADE"), nullable=True, index=True)
+    date = Column(Date, index=True, nullable=False)
+    campaign_name = Column(String)
+    group_id = Column(String, nullable=True, index=True)
+    creative_id = Column(String, nullable=True, index=True)
+    creative_name = Column(String, nullable=True)
+    impressions = Column(BigInteger, default=0)
+    clicks = Column(BigInteger, default=0)
+    cost = Column(Numeric(20, 2), default=0)
+    conversions = Column(BigInteger, default=0)
+    cpc = Column(Numeric(20, 2), nullable=True)
+    cpa = Column(Numeric(20, 2), nullable=True)
+
+    client = relationship("Client", back_populates="avito_creatives")
+    campaign = relationship("Campaign", back_populates="avito_creatives")
 
 
 class VKStats(Base):

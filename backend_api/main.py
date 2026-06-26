@@ -43,11 +43,36 @@ def init_db_with_retry(max_retries=10, retry_delay=2):
                 conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS two_factor_enabled BOOLEAN NOT NULL DEFAULT FALSE"))
                 conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS interface_language VARCHAR(8) NOT NULL DEFAULT 'ru'"))
                 conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS notification_email VARCHAR"))
+                conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS metrika_client_id VARCHAR"))
+                conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS metrika_yclid VARCHAR"))
+                conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS ym_milestones TEXT"))
+                # username — отображаемое имя, может повторяться (логин по email).
+                # Снимаем устаревшее UNIQUE-ограничение, оставляем обычный индекс.
+                conn.execute(text("DROP INDEX IF EXISTS ix_users_username"))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_users_username ON users (username)"))
                 conn.execute(text("ALTER TABLE clients ADD COLUMN IF NOT EXISTS direction_label VARCHAR(32) NOT NULL DEFAULT 'directions'"))
                 conn.execute(text("ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS platform_status VARCHAR"))
                 conn.execute(text("ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS platform_state VARCHAR"))
                 conn.execute(text("ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS display_status VARCHAR"))
                 conn.execute(text("ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS status_synced_at TIMESTAMP WITH TIME ZONE"))
+                conn.execute(text("ALTER TABLE integrations ADD COLUMN IF NOT EXISTS utm_source VARCHAR"))
+                conn.execute(text("ALTER TABLE yandex_keywords ADD COLUMN IF NOT EXISTS campaign_id UUID"))
+                conn.execute(text("ALTER TABLE yandex_groups ADD COLUMN IF NOT EXISTS campaign_id UUID"))
+                conn.execute(text("ALTER TABLE yandex_groups ADD COLUMN IF NOT EXISTS group_id VARCHAR"))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_yandex_groups_client_id ON yandex_groups (client_id)"))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_yandex_groups_campaign_id ON yandex_groups (campaign_id)"))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_yandex_groups_group_id ON yandex_groups (group_id)"))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_yandex_ads_client_id ON yandex_ads (client_id)"))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_yandex_ads_campaign_id ON yandex_ads (campaign_id)"))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_yandex_ads_group_id ON yandex_ads (group_id)"))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_yandex_ads_ad_id ON yandex_ads (ad_id)"))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_avito_groups_client_id ON avito_groups (client_id)"))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_avito_groups_campaign_id ON avito_groups (campaign_id)"))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_avito_groups_group_id ON avito_groups (group_id)"))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_avito_creatives_client_id ON avito_creatives (client_id)"))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_avito_creatives_campaign_id ON avito_creatives (campaign_id)"))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_avito_creatives_group_id ON avito_creatives (group_id)"))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_avito_creatives_creative_id ON avito_creatives (creative_id)"))
             logger.info("Database tables created successfully")
             return
         except OperationalError as e:
@@ -130,6 +155,15 @@ async def startup_event():
     from automation.request_queue import get_request_queue
     await get_request_queue()  # Инициализируем очередь запросов
     logger.info("✅ Application startup complete - request queue initialized")
+
+    # Воркер очереди синхронизации держим в backend и стартуем при загрузке —
+    # он обрабатывает и ручные задачи, и ночные авто-задачи (их ставит automation).
+    try:
+        from backend_api.sync_jobs import ensure_sync_worker_started
+        ensure_sync_worker_started()
+        logger.info("✅ Sync job worker started")
+    except Exception as e:
+        logger.error(f"Failed to start sync job worker: {e}")
 
     # Планировщик для задач телефонии и отчётов
     global lead_scheduler

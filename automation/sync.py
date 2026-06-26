@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
@@ -31,6 +31,39 @@ YANDEX_CLIENT_SECRET = cfg.oauth.yandex_client_secret
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+def _clean_yandex_profile_login(value: Optional[str]) -> Optional[str]:
+    profile = str(value or "").strip()
+    if not profile:
+        return None
+    if profile.lower() in {"unknown", "none"}:
+        return None
+    # ВНИМАНИЕ: логины вида "porg-..." — это валидные агентские Client-Login
+    # реальных кабинетов Яндекс.Директа (например porg-hf7cit2n = ПОДАРКИ ВОСТОКА).
+    # Их НЕЛЬЗЯ обнулять: без Client-Login запрос уходит в личный аккаунт токена
+    # и возвращает 0 строк — данные по кабинету не подтягиваются.
+    return profile
+
+
+def _selected_yandex_direct_profile(integration: models.Integration) -> Optional[str]:
+    if getattr(integration, "is_agency", False):
+        profile = integration.agency_client_login or integration.account_id
+    else:
+        profile = integration.account_id
+    return _clean_yandex_profile_login(profile)
+
+
+def _avito_utm_source(integration: models.Integration) -> str:
+    source = str(getattr(integration, "utm_source", None) or "").strip()
+    return source or "avito-ads"
+
+
+def _metrika_utm_source_filter(source: str) -> str:
+    # Metrika filter syntax uses quoted string literals. Escape only the
+    # characters that can break the literal; the value itself remains user-editable.
+    safe_source = str(source or "avito-ads").replace("\\", "\\\\").replace("'", "\\'")
+    return f"ym:s:UTMSource=='{safe_source}'"
 
 
 def _upsert_campaign_catalog(
@@ -109,9 +142,11 @@ def _update_or_create_stats(db: Session, model, filters: dict, data: dict, verbo
                 raise
 
 
-def _bulk_upsert_stats_by_key(db: Session, model, rows: list):
+def _bulk_upsert_stats_by_key(db: Session, model, rows: list, extra_key_fields: tuple[str, ...] = ()):
     """
-    Batched upsert by logical key (client_id, campaign_id, date) without per-row SELECT/flush.
+    Batched upsert by logical key without per-row SELECT/flush.
+    Base key is (client_id, campaign_id, date); child stat tables can append
+    identifiers such as group_id or creative_id.
     """
     if not rows:
         return 0
@@ -128,11 +163,17 @@ def _bulk_upsert_stats_by_key(db: Session, model, rows: list):
         model.date >= min_date,
         model.date <= max_date,
     ).all()
-    existing_map = {(e.client_id, e.campaign_id, e.date): e for e in existing}
+    def row_key(row):
+        return tuple(row[field] for field in ("client_id", "campaign_id", "date", *extra_key_fields))
+
+    def model_key(item):
+        return tuple(getattr(item, field) for field in ("client_id", "campaign_id", "date", *extra_key_fields))
+
+    existing_map = {model_key(e): e for e in existing}
 
     updated = 0
     for row in rows:
-        key = (row["client_id"], row["campaign_id"], row["date"])
+        key = row_key(row)
         rec = existing_map.get(key)
         if rec:
             for k, v in row.items():
@@ -525,12 +566,10 @@ def sync_metrika_goals_background(
                     return
                 access_token = security.decrypt_token(metrika_integration.access_token)
                 selected_profile = metrika_profile_login(metrika_integration)
-                filters = "ym:s:UTMSource=='avito-ads'"
+                filters = _metrika_utm_source_filter(_avito_utm_source(integration))
             else:
                 access_token = security.decrypt_token(integration.access_token)
-                selected_profile = integration.agency_client_login or integration.account_id
-                if selected_profile and str(selected_profile).lower() in ("unknown", "none", ""):
-                    selected_profile = None
+                selected_profile = _selected_yandex_direct_profile(integration)
             new_loop.run_until_complete(
                 _sync_metrika_goals_for_direct(
                     db, integration, date_from_str, date_to_str,
@@ -567,15 +606,10 @@ async def sync_integration(db: Session, integration: models.Integration, date_fr
         if integration.platform == models.IntegrationPlatform.YANDEX_DIRECT:
             access_token = security.decrypt_token(integration.access_token)
             
-            # CRITICAL: Use exactly тот профиль, который пользователь выбрал на шаге 2.
-            # В UI этот профиль сохраняется в integration.account_id и integration.agency_client_login.
-            # Приоритет: agency_client_login (более точный), затем account_id
-            # Это логин рекламного кабинета (например, "istore-habarovsk"), который используется в Client-Login заголовке
-            selected_profile = None
-            if integration.agency_client_login and integration.agency_client_login.lower() not in ["unknown", "none", ""]:
-                selected_profile = integration.agency_client_login
-            elif integration.account_id and integration.account_id.lower() not in ["unknown", "none", ""]:
-                selected_profile = integration.account_id
+            # Use agency Client-Login only for agency integrations. In regular
+            # integrations stale agency_client_login values can be display aliases,
+            # not valid Direct logins, and Yandex rejects them with 404/8800.
+            selected_profile = _selected_yandex_direct_profile(integration)
             
             logger.info(
                 f"Syncing Yandex Direct integration {integration.id} "
@@ -839,11 +873,12 @@ async def sync_integration(db: Session, integration: models.Integration, date_fr
 
             level_stats_list = [
                 ("group", group_stats_result if not isinstance(group_stats_result, Exception) else []),
-                ("keyword", keyword_stats_result if not isinstance(keyword_stats_result, Exception) else [])
+                ("keyword", keyword_stats_result if not isinstance(keyword_stats_result, Exception) else []),
             ]
 
-            # Оптимизация: не делаем SELECT campaign для каждой строки статистики.
-            # Предзагружаем названия кампаний этой интеграции в set.
+            # Keyword reports do not carry our DB campaign_id, so they still need
+            # a defensive name check. Group reports have CampaignId and must be
+            # matched by the stable external ID instead of campaign name.
             integration_campaign_names = {
                 row[0]
                 for row in db.query(models.Campaign.name)
@@ -855,22 +890,22 @@ async def sync_integration(db: Session, integration: models.Integration, date_fr
             for level, level_stats in level_stats_list:
                 try:
                     for l in level_stats:
-                        # CRITICAL: Verify that campaign_name belongs to this integration
-                        # This prevents saving stats for campaigns from other profiles
                         campaign_name = l.get('campaign_name', '')
-                        if campaign_name not in integration_campaign_names:
-                            logger.debug(
-                                f"Skipping {level} stats for campaign '{campaign_name}' - "
-                                f"not found in DB for integration {integration.id}. "
-                                f"This campaign likely belongs to a different profile."
-                            )
-                            continue
-                        
                         if level == "group":
+                            campaign_external_id = str(l.get("campaign_id") or "")
+                            campaign = campaign_map.get(campaign_external_id)
+                            if not campaign:
+                                logger.debug(
+                                    f"Skipping group stats for campaign_id={campaign_external_id} "
+                                    f"campaign='{campaign_name}' - not found in DB for integration {integration.id}"
+                                )
+                                continue
                             filters = {
                                 "client_id": integration.client_id,
+                                "campaign_id": campaign.id,
                                 "date": datetime.strptime(l['date'], "%Y-%m-%d").date(),
-                                "campaign_name": campaign_name,
+                                "campaign_name": campaign_name or campaign.name,
+                                "group_id": l.get('group_id'),
                                 "group_name": l['name']
                             }
                             data = {
@@ -881,6 +916,15 @@ async def sync_integration(db: Session, integration: models.Integration, date_fr
                             }
                             _update_or_create_stats(db, models.YandexGroups, filters, data, verbose=False)
                         else:
+                            # CRITICAL: Verify that keyword campaign_name belongs to this integration.
+                            # This prevents saving keyword stats for campaigns from other profiles.
+                            if campaign_name not in integration_campaign_names:
+                                logger.debug(
+                                    f"Skipping {level} stats for campaign '{campaign_name}' - "
+                                    f"not found in DB for integration {integration.id}. "
+                                    f"This campaign likely belongs to a different profile."
+                                )
+                                continue
                             filters = {
                                 "client_id": integration.client_id,
                                 "date": datetime.strptime(l['date'], "%Y-%m-%d").date(),
@@ -897,6 +941,15 @@ async def sync_integration(db: Session, integration: models.Integration, date_fr
                 except Exception as e:
                     logger.warning(f"Error syncing {level} stats: {e}")
                     continue
+
+            db.commit()
+            CacheService.invalidate_client(str(integration.client_id))
+            logger.info(
+                "✅ Committed Yandex drilldown stats: groups=%s keywords=%s ads=%s",
+                len(group_stats_result),
+                len(keyword_stats_result if not isinstance(keyword_stats_result, Exception) else []),
+                "lazy",
+            )
 
         elif integration.platform == models.IntegrationPlatform.VK_ADS:
             access_token = security.decrypt_token(integration.access_token)
@@ -1140,7 +1193,22 @@ async def sync_integration(db: Session, integration: models.Integration, date_fr
                 integration.error_message = "No counter ID (account_id) configured"
                 integration.sync_status = models.IntegrationSyncStatus.FAILED
                 return
-            
+
+            # account_id Метрики используется как ID счётчика — он должен быть числовым.
+            # Когда Метрику подключают как аккаунт для лидов Avito, в account_id попадает
+            # ЛОГИН/домен (например 'burlakov.timof'), а не счётчик. Синкать его как
+            # отдельный счётчик нечего (цели приходят через синк Avito с utm-фильтром) —
+            # пропускаем без ошибки, иначе Метрика возвращает 400 и интеграция «падает».
+            if not str(integration.account_id).strip().isdigit():
+                logger.info(
+                    f"Metrika integration {integration.id}: account_id "
+                    f"'{integration.account_id}' не числовой счётчик — пропускаем синк целей"
+                )
+                integration.sync_status = models.IntegrationSyncStatus.SUCCESS
+                integration.error_message = None
+                integration.last_sync_at = datetime.utcnow()
+                return
+
             access_token = security.decrypt_token(integration.access_token)
             
             # CRITICAL: Use selected profile (agency_client_login) to ensure we sync stats for the correct profile
@@ -1281,7 +1349,13 @@ async def sync_integration(db: Session, integration: models.Integration, date_fr
                 models.Campaign.is_active.is_(True),
             ).all()
             external_ids = [str(c.external_id) for c in campaigns if c.external_id]
-            stats = await api.get_statistics(external_ids, date_from, date_to, integration.account_id)
+            stats_bundle = await api.get_statistics_bundle(
+                external_ids,
+                date_from,
+                date_to,
+                integration.account_id,
+            )
+            stats = stats_bundle.get("campaigns", [])
 
             campaign_map = {str(c.external_id): c for c in campaigns}
             avito_rows = []
@@ -1303,6 +1377,63 @@ async def sync_integration(db: Session, integration: models.Integration, date_fr
                     "cpa": None,
                 })
             _bulk_upsert_stats_by_key(db, models.AvitoStats, avito_rows)
+
+            avito_group_rows = []
+            for s in stats_bundle.get("groups", []):
+                campaign_external_id = str(s.get("campaign_id", ""))
+                campaign = campaign_map.get(campaign_external_id)
+                group_id = str(s.get("group_id") or "").strip()
+                if not campaign or not group_id:
+                    continue
+                avito_group_rows.append({
+                    "client_id": integration.client_id,
+                    "campaign_id": campaign.id,
+                    "date": datetime.strptime(s["date"], "%Y-%m-%d").date(),
+                    "campaign_name": s.get("campaign_name") or campaign.name,
+                    "group_id": group_id,
+                    "group_name": s.get("group_name") or f"Группа {group_id}",
+                    "impressions": s.get("impressions", 0),
+                    "clicks": s.get("clicks", 0),
+                    "cost": s.get("cost", 0),
+                    "conversions": 0,
+                    "cpc": s.get("cpc"),
+                    "cpa": None,
+                })
+            _bulk_upsert_stats_by_key(
+                db,
+                models.AvitoGroups,
+                avito_group_rows,
+                extra_key_fields=("group_id",),
+            )
+
+            avito_creative_rows = []
+            for s in stats_bundle.get("creatives", []):
+                campaign_external_id = str(s.get("campaign_id", ""))
+                campaign = campaign_map.get(campaign_external_id)
+                creative_id = str(s.get("creative_id") or "").strip()
+                if not campaign or not creative_id:
+                    continue
+                avito_creative_rows.append({
+                    "client_id": integration.client_id,
+                    "campaign_id": campaign.id,
+                    "date": datetime.strptime(s["date"], "%Y-%m-%d").date(),
+                    "campaign_name": s.get("campaign_name") or campaign.name,
+                    "group_id": str(s.get("group_id") or "").strip() or None,
+                    "creative_id": creative_id,
+                    "creative_name": s.get("creative_name") or f"Креатив {creative_id}",
+                    "impressions": s.get("impressions", 0),
+                    "clicks": s.get("clicks", 0),
+                    "cost": s.get("cost", 0),
+                    "conversions": 0,
+                    "cpc": s.get("cpc"),
+                    "cpa": None,
+                })
+            _bulk_upsert_stats_by_key(
+                db,
+                models.AvitoCreatives,
+                avito_creative_rows,
+                extra_key_fields=("creative_id",),
+            )
             db.commit()
 
             metrika_integration = get_metrika_integration_for_client(db, integration.client_id)
@@ -1318,7 +1449,7 @@ async def sync_integration(db: Session, integration: models.Integration, date_fr
                         date_to,
                         metrika_token,
                         selected_profile,
-                        filters="ym:s:UTMSource=='avito-ads'",
+                        filters=_metrika_utm_source_filter(_avito_utm_source(integration)),
                     )
                 except Exception as metrika_err:
                     logger.warning(
@@ -1448,8 +1579,26 @@ async def sync_data(days: int = 7, max_concurrent: int = 4):
             return_exceptions=True,
         )
 
-        db = SessionLocal()
-        clients = db.query(models.Client).filter(models.Client.id.in_(client_ids)).all() if client_ids else []
+        run_post_sync_reports(end_date)
+    finally:
+        pass
+
+
+def run_post_sync_reports(end_date: Optional[date] = None):
+    """Сгенерировать недельные/месячные отчёты и выгрузить в Google Sheets
+    для всех активных клиентов. Чистые SQL-агрегации + экспорт, без обращений
+    к рекламным API. Запускается отдельной ночной задачей после окна синка.
+    """
+    if end_date is None:
+        end_date = datetime.now().date()
+
+    db: Session = SessionLocal()
+    try:
+        clients = (
+            db.query(models.Client)
+            .filter(models.Client.status == models.ClientStatus.ACTIVE)
+            .all()
+        )
 
         for client in clients:
             try:
@@ -1470,8 +1619,7 @@ async def sync_data(days: int = 7, max_concurrent: int = 4):
 
         db.commit()
     finally:
-        if 'db' in locals():
-            db.close()
+        db.close()
 
 if __name__ == "__main__":
     import sys

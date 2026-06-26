@@ -245,11 +245,11 @@
                       <span>{{ capitalizeFirst(channel.goalNoun) }}</span>
                     </div>
                     <div class="project-channel-metric project-channel-metric--cpl">
-                      <strong>{{ channel.avgCpl !== null ? formatMoney(withVat(channel.avgCpl)) : '—' }}</strong>
+                      <strong>{{ channel.avgCpl !== null ? formatMoney(withChannelVat(channel.avgCpl, channel.code)) : '—' }}</strong>
                       <span>Общий CPL</span>
                     </div>
                     <div class="project-channel-metric project-channel-metric--spend">
-                      <strong>{{ formatMoney(withVat(channel.expenses)) }}</strong>
+                      <strong>{{ formatMoney(withChannelVat(channel.expenses, channel.code)) }}</strong>
                       <span>Расход</span>
                     </div>
                   </div>
@@ -264,7 +264,7 @@
                     <span>{{ goal.name }}</span>
                     <strong>{{ formatNumber(goal.count) }} шт</strong>
                     <template v-if="channel.code !== 'yandex'">
-                      <b>{{ formatGoalCpl(goal) }}</b>
+                      <b>{{ formatGoalCpl(goal, channel.code) }}</b>
                       <em v-if="goal.hasCost" :class="goalTrendClass(goal.trend)">{{ trendTextFromValue(goal.trend) }}</em>
                     </template>
                   </div>
@@ -445,10 +445,28 @@ const lastProjectSyncAt = computed(() => {
   return timestamps.length ? Math.max(...timestamps) : null
 })
 
+// Источник самой свежей синхронизации (auto | manual | null) для индикатора
+const lastProjectSyncTrigger = computed(() => {
+  let latest = null
+  let trigger = null
+  for (const project of projects.value) {
+    for (const integration of project.integrations || []) {
+      const ts = Date.parse(integration.last_sync_at || '')
+      if (Number.isFinite(ts) && (latest === null || ts > latest)) {
+        latest = ts
+        trigger = integration.last_sync_trigger || null
+      }
+    }
+  }
+  return trigger
+})
+
 const projectSyncStatusText = computed(() => {
   if (projectsSyncing.value) return 'Выполняется синхронизация, пожалуйста подождите'
   const formatted = formatMoscowSyncDate(lastProjectSyncAt.value)
-  return formatted ? `Последняя синхронизация: ${formatted} МСК` : ''
+  if (!formatted) return ''
+  const suffix = lastProjectSyncTrigger.value === 'auto' ? ' · авто' : ''
+  return `Последняя синхронизация: ${formatted} МСК${suffix}`
 })
 
 const isProjectSyncing = (project) => syncingIntegrations.value || isSyncingForProject(project.id)
@@ -547,6 +565,26 @@ const VAT_RATE = 1.22
 const formatNumber = (num) => new Intl.NumberFormat('ru-RU').format(Number(num || 0))
 const formatMoney = (num) => `${new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 2 }).format(Number(num || 0))} ₽`
 const withVat = (num) => (Number(num) || 0) * (includeVat.value ? VAT_RATE : 1)
+const channelHasVatIncluded = (platformCode) => String(platformCode || '').toLowerCase() === 'avito'
+const withChannelVat = (num, platformCode) => {
+  const value = Number(num) || 0
+  if (channelHasVatIncluded(platformCode)) {
+    // Авито: из API уже с НДС → «с НДС» как есть, «без НДС» вычитаем налог
+    return includeVat.value ? value : value / VAT_RATE
+  }
+  return includeVat.value ? value * VAT_RATE : value
+}
+const withCostBreakdownVat = (num, costByPlatform) => {
+  if (!costByPlatform || typeof costByPlatform !== 'object') return Number(num || 0)
+  const yandex = Number(costByPlatform.yandex || 0)
+  const vk = Number(costByPlatform.vk || 0)
+  const avito = Number(costByPlatform.avito || 0)
+  if (includeVat.value) {
+    return (yandex * VAT_RATE) + (vk * VAT_RATE) + avito
+  }
+  // «без НДС»: Яндекс/VK как есть, у Авито вычитаем НДС
+  return yandex + vk + (avito / VAT_RATE)
+}
 
 const trendText = (metric, key) => {
   const trend = Number(metric?.trends?.[key] || 0)
@@ -594,14 +632,28 @@ async function copyProjectId(project) {
 }
 
 const hasPlatform = (project, platform) => hasProjectPlatform(project, platform)
+const isAvitoOnlyProject = (project) =>
+  hasPlatform(project, 'AVITO') && !hasPlatform(project, 'YANDEX') && !hasPlatform(project, 'VK')
 
 const projectStats = (project) => {
   const metric = getProjectMetric(project.id)
+  const withProjectVat = (value) => (isAvitoOnlyProject(project) ? withChannelVat(value, 'avito') : withVat(value))
+  const platforms = projectPlatformCards(project)
+  const insights = getProjectInsights(project.id)
+  const adjustedExpenses = metric.cost_by_platform
+    ? withCostBreakdownVat(metric.expenses, metric.cost_by_platform)
+    : platforms.length
+      ? platforms.reduce((sum, platform) => sum + withChannelVat(insights[platform.code]?.expenses || 0, platform.code), 0)
+      : withProjectVat(metric.expenses)
+  const adjustedClicks = platforms.length
+    ? platforms.reduce((sum, platform) => sum + Number(insights[platform.code]?.clicks || 0), 0)
+    : Number(metric.clicks || 0)
+  const adjustedCpc = adjustedClicks > 0 ? adjustedExpenses / adjustedClicks : withProjectVat(metric.cpc)
   return [
     { key: 'impressions', label: 'Показы', subtitle: 'По всем каналам', value: formatNumber(metric.impressions), icon: '/admirra/img/svg/sprite.svg#diagrama' },
     { key: 'clicks', label: 'Клики', subtitle: 'Все переходы', value: formatNumber(metric.clicks), icon: '/admirra/img/svg/sprite.svg#cursore' },
-    { key: 'cpc', label: 'CPC', subtitle: 'Стоимость клика', value: formatMoney(withVat(metric.cpc)), icon: '/admirra/img/svg/sprite.svg#diagrama-circle' },
-    { key: 'expenses', label: 'Расходы', subtitle: 'За период', value: formatMoney(withVat(metric.expenses)), icon: '/admirra/img/svg/sprite.svg#wallet' },
+    { key: 'cpc', label: 'CPC', subtitle: 'Стоимость клика', value: formatMoney(adjustedCpc), icon: '/admirra/img/svg/sprite.svg#diagrama-circle' },
+    { key: 'expenses', label: 'Расходы', subtitle: 'За период', value: formatMoney(adjustedExpenses), icon: '/admirra/img/svg/sprite.svg#wallet' },
   ].map((item) => ({ ...item, change: trendText(metric, item.key) }))
 }
 
@@ -702,11 +754,11 @@ const topGoalSummary = (goals, platformCode, expenses) => {
     total,
     noun,
     avgCpl,
-    text: `${formatNumber(total)} ${noun} · CPL ${formatMoney(withVat(avgCpl))}`,
+    text: `${formatNumber(total)} ${noun} · CPL ${formatMoney(withChannelVat(avgCpl, platformCode))}`,
   }
 }
 
-const formatGoalCpl = (goal) => goal.hasCost ? formatMoney(withVat(goal.cpl)) : '—'
+const formatGoalCpl = (goal, platformCode) => goal.hasCost ? formatMoney(withChannelVat(goal.cpl, platformCode)) : '—'
 
 const projectChannelSummaries = (project) => {
   const insights = getProjectInsights(project.id)
@@ -733,7 +785,7 @@ const projectBalances = (project) => {
     return {
       ...platform,
       name: platform.balanceName,
-      value: formatMoney(withVat(value)),
+      value: formatMoney(withChannelVat(value, platform.code)),
     }
   })
 }
@@ -884,7 +936,7 @@ const handleSyncProjects = async () => {
 
   syncingIntegrations.value = true
   try {
-    const results = await Promise.allSettled(uniqueIntegrations.map((integration) => startIntegrationSync(integration.id, { days: 90 })))
+    const results = await Promise.allSettled(uniqueIntegrations.map((integration) => startIntegrationSync(integration.id, { days: 90, forceFull: false })))
     const jobIds = results
       .filter((result) => result.status === 'fulfilled')
       .map((result) => result.value?.job_id)

@@ -16,7 +16,9 @@ const form = reactive({
   avito_client_secret: '',
   avito_account_id: '',
   account_id: null,
+  account_name: '',
   agency_client_login: '',
+  utm_source: 'avito-ads',
   primary_goal_id: null
 })
 
@@ -49,14 +51,21 @@ export function useIntegrationWizard() {
   const resetStore = () => {
     currentStep.value = 1
     lastIntegrationId.value = null
+    try {
+      localStorage.removeItem('wizard_integration_id')
+      localStorage.removeItem('metrika_integration_id')
+    } catch (e) {}
     error.value = null
+    form.platform = 'YANDEX_DIRECT'
     form.client_id = null
     form.client_name = ''
     form.avito_client_id = ''
     form.avito_client_secret = ''
     form.avito_account_id = ''
     form.account_id = null
+    form.account_name = ''
     form.agency_client_login = ''
+    form.utm_source = 'avito-ads'
     form.primary_goal_id = null
     campaigns.value = []
     selectedCampaignIds.value = []
@@ -126,7 +135,9 @@ export function useIntegrationWizard() {
   const metrikaAccountParam = () => {
     if (form.platform === 'AVITO_ADS') return ''
     const targetAccount = form.agency_client_login || form.account_id
-    return targetAccount ? `&account_id=${targetAccount}` : ''
+    const normalizedAccount = String(targetAccount || '').trim()
+    if (!normalizedAccount || normalizedAccount.toLowerCase().startsWith('porg-')) return ''
+    return `&account_id=${encodeURIComponent(normalizedAccount)}`
   }
 
   const fetchCounters = async (integrationId) => {
@@ -141,9 +152,16 @@ export function useIntegrationWizard() {
       const { data } = await api.get(`/integrations/${integrationId}/counters?${accountIdParam}${campaignIdsParam}`)
       
       counters.value = data.counters || []
-      
-      // Auto-select all counters by default
-      selectedCounterIds.value = counters.value.map(c => c.id)
+
+      // Авто-выбор всех счётчиков — только когда их немного. При большом числе
+      // (например Avito с сотней счётчиков) НЕ грузим тысячи целей сразу: пользователь
+      // сам выбирает счётчик, и под него подгружаются цели (каскад, как в Яндексе).
+      const AUTO_SELECT_COUNTER_LIMIT = 5
+      if (counters.value.length <= AUTO_SELECT_COUNTER_LIMIT) {
+        selectedCounterIds.value = counters.value.map(c => c.id)
+      } else {
+        selectedCounterIds.value = []
+      }
     } catch (err) {
       console.error('Failed to fetch counters:', err)
       toaster.warning('Не удалось загрузить счетчики Метрики.')
@@ -156,6 +174,13 @@ export function useIntegrationWizard() {
   const fetchGoals = async (integrationId) => {
     loadingStates.goals = true
     try {
+      if (form.platform === 'AVITO_ADS' && selectedCounterIds.value.length === 0) {
+        goals.value = []
+        selectedGoalIds.value = []
+        form.primary_goal_id = null
+        return
+      }
+
       const { date_from, date_to } = getDateRangeParams()
       const accountIdParam = metrikaAccountParam()
 
@@ -211,6 +236,8 @@ export function useIntegrationWizard() {
       form.platform = integration.platform
       form.client_id = integration.client_id
       form.account_id = integration.account_id
+      form.account_name = integration.account_name || ''
+      form.utm_source = integration.utm_source || 'avito-ads'
       // CRITICAL: agency_client_login is separate from account_id
       // It's set when user selects a profile on step 2
       form.agency_client_login = integration.agency_client_login || integration.account_id
@@ -298,6 +325,7 @@ export function useIntegrationWizard() {
         selected_counters: [...selectedCounterIds.value],
         primary_goal_id: form.primary_goal_id,
         selected_goals: [...selectedGoalIds.value],
+        ...(form.platform === 'AVITO_ADS' && { utm_source: form.utm_source || 'avito-ads' }),
         is_active: true
       })
       toaster.success("Интеграция успешно настроена!")

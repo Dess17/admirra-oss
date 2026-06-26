@@ -111,7 +111,11 @@ def create_client(
     )
     db.commit()
     db.refresh(new_client)
-    return new_client
+    resp = schemas.ClientResponse.model_validate(new_client)
+    resp.owner_project_count = (
+        db.query(models.Client).filter(models.Client.owner_id == current_user.id).count()
+    )
+    return resp
 
 @router.get("/{client_id}", response_model=schemas.ClientResponse)
 def get_client(
@@ -485,6 +489,8 @@ def delete_client(
 
     if campaign_ids:
         db.query(models.YandexStats).filter(models.YandexStats.campaign_id.in_(campaign_ids)).delete(synchronize_session=False)
+        db.query(models.YandexGroups).filter(models.YandexGroups.campaign_id.in_(campaign_ids)).delete(synchronize_session=False)
+        db.query(models.YandexAds).filter(models.YandexAds.campaign_id.in_(campaign_ids)).delete(synchronize_session=False)
         db.query(models.VKStats).filter(models.VKStats.campaign_id.in_(campaign_ids)).delete(synchronize_session=False)
     if campaign_names:
         db.query(models.YandexKeywords).filter(
@@ -502,6 +508,7 @@ def delete_client(
     db.query(models.AvitoStats).filter(models.AvitoStats.client_id == client_id).delete(synchronize_session=False)
     db.query(models.YandexKeywords).filter(models.YandexKeywords.client_id == client_id).delete(synchronize_session=False)
     db.query(models.YandexGroups).filter(models.YandexGroups.client_id == client_id).delete(synchronize_session=False)
+    db.query(models.YandexAds).filter(models.YandexAds.client_id == client_id).delete(synchronize_session=False)
     db.query(models.MetrikaGoals).filter(models.MetrikaGoals.client_id == client_id).delete(synchronize_session=False)
     db.query(models.WeeklyReport).filter(models.WeeklyReport.client_id == client_id).delete(synchronize_session=False)
     db.query(models.MonthlyReport).filter(models.MonthlyReport.client_id == client_id).delete(synchronize_session=False)

@@ -9,6 +9,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile, status
 from fastapi.responses import JSONResponse
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 from PIL import Image, ImageOps, UnidentifiedImageError
 
@@ -76,6 +77,21 @@ def _user_has_usable_password(user: models.User) -> bool:
     if identities:
         return False
     return bool(user.password_hash)
+
+
+def _normalize_email(email: str) -> str:
+    return str(email or "").strip().lower()
+
+
+def _find_user_by_email_ci(db: Session, email: str) -> Optional[models.User]:
+    normalized = _normalize_email(email)
+    if not normalized:
+        return None
+    return (
+        db.query(models.User)
+        .filter(func.lower(models.User.email) == normalized)
+        .first()
+    )
 
 
 def _mask_secret(value: Optional[str]) -> Optional[str]:
@@ -191,16 +207,15 @@ async def register_user(user: schemas.UserCreate, db: Session = Depends(get_db))
     Регистрация: пользователь создаётся с email_verified=False, JWT не выдаётся.
     На почту уходит ссылка с токеном.
     """
-    logger.info("Registration attempt for email: %s", user.email)
+    email = _normalize_email(user.email)
+    logger.info("Registration attempt for email: %s", email)
 
-    db_user_email = db.query(models.User).filter(models.User.email == user.email).first()
+    db_user_email = _find_user_by_email_ci(db, email)
     if db_user_email:
         raise HTTPException(status_code=400, detail="Email already registered")
 
-    if user.username:
-        db_user_name = db.query(models.User).filter(models.User.username == user.username).first()
-        if db_user_name:
-            raise HTTPException(status_code=400, detail="Username already taken")
+    # username — это отображаемое имя (с формы «Имя»), оно НЕ уникально и может
+    # повторяться. Уникален только email. Поэтому дубль имени не проверяем.
 
     hashed_password = security.get_password_hash(user.password)
     raw_token = generate_email_verification_raw_token()
@@ -208,7 +223,7 @@ async def register_user(user: schemas.UserCreate, db: Session = Depends(get_db))
     exp = verification_expiry(48)
 
     new_user = models.User(
-        email=user.email,
+        email=email,
         username=user.username,
         first_name=user.first_name,
         last_name=user.last_name,
@@ -229,13 +244,13 @@ async def register_user(user: schemas.UserCreate, db: Session = Depends(get_db))
 
     verify_url = _frontend_verify_url(raw_token)
     if smtp_delivery_active():
-        sent = await send_verification_link_email(user.email, verify_url)
+        sent = await send_verification_link_email(email, verify_url)
         if not sent:
             raise HTTPException(status_code=503, detail="Failed to send verification email")
-        return schemas.RegisterPendingResponse(email=user.email)
+        return schemas.RegisterPendingResponse(email=email)
 
     if smtp_enabled() and not smtp_configured():
-        logger.error("SMTP not configured; cannot send verification email to %s", user.email)
+        logger.error("SMTP not configured; cannot send verification email to %s", email)
         raise HTTPException(
             status_code=503,
             detail="Email delivery is not configured on server",
@@ -243,10 +258,10 @@ async def register_user(user: schemas.UserCreate, db: Session = Depends(get_db))
 
     logger.warning(
         "SMTP_ENABLED=false: registration OK for %s, verification email not sent",
-        user.email,
+        email,
     )
     return schemas.RegisterPendingResponse(
-        email=user.email,
+        email=email,
         message="Аккаунт создан. Отправка письма отключена (SMTP_ENABLED=false). "
         "Подтвердите email вручную или включите SMTP и используйте «Отправить снова».",
     )
@@ -293,7 +308,7 @@ async def verify_email(
 @router.post("/resend-verification")
 async def resend_verification(body: schemas.ResendVerificationRequest, db: Session = Depends(get_db)):
     """Повторная отправка письма подтверждения (throttle)."""
-    user = db.query(models.User).filter(models.User.email == body.email).first()
+    user = _find_user_by_email_ci(db, body.email)
     # Не раскрываем, есть ли пользователь
     generic = {"message": "Если email зарегистрирован и не подтверждён, письмо отправлено."}
     if not user or user.email_verified:
@@ -335,7 +350,7 @@ async def login_password_step(
     - Неподтверждённая почта → step=email_not_verified (без JWT), если AUTH_REQUIRE_EMAIL_VERIFIED.
     - Иначе → OTP на почту или JWT (как у подтверждённой почты).
     """
-    user = db.query(models.User).filter(models.User.email == login_data.email).first()
+    user = _find_user_by_email_ci(db, login_data.email)
 
     if not user or not security.verify_password(login_data.password, user.password_hash):
         raise HTTPException(
@@ -451,7 +466,7 @@ def logout(request: Request, response: Response, db: Session = Depends(get_db)):
 async def reset_password_request(body: schemas.PasswordResetRequestBody, db: Session = Depends(get_db)):
     """Шаг 1 сброса пароля: отправляет ссылку на email (ответ всегда 200, чтобы не раскрывать наличие аккаунта)."""
     generic = {"message": "Если указанный email зарегистрирован, ссылка для сброса пароля отправлена."}
-    user = db.query(models.User).filter(models.User.email == body.email).first()
+    user = _find_user_by_email_ci(db, body.email)
     if not user:
         return generic
 
@@ -530,20 +545,58 @@ def read_users_me(
     return _decorate_user_response(resp, current_user)
 
 
+@router.post("/metrika/identity", status_code=status.HTTP_204_NO_CONTENT)
+def save_metrika_identity(
+    body: schemas.MetrikaIdentityRequest,
+    current_user: models.User = Depends(security.get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Сохранить ClientID Метрики и yclid на аккаунт (первое значение фиксируем —
+    оно соответствует визиту, который привёл к регистрации). Для офлайн-конверсий."""
+    changed = False
+    cid = (body.client_id or "").strip()
+    yclid = (body.yclid or "").strip()
+    if cid and not current_user.metrika_client_id:
+        current_user.metrika_client_id = cid[:128]
+        changed = True
+    if yclid and not current_user.metrika_yclid:
+        current_user.metrika_yclid = yclid[:255]
+        changed = True
+    if changed:
+        db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/metrika/milestone", response_model=schemas.MetrikaMilestoneResponse)
+def claim_metrika_milestone(
+    body: schemas.MetrikaMilestoneRequest,
+    current_user: models.User = Depends(security.get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Отметить достижение «вехи» Метрики единожды на аккаунт (дедуп «первого раза»,
+    например integration_connected). first=True только при первом достижении."""
+    import json as _json
+    name = (body.name or "").strip()
+    if not name:
+        return schemas.MetrikaMilestoneResponse(first=False)
+    try:
+        claimed = set(_json.loads(current_user.ym_milestones)) if current_user.ym_milestones else set()
+    except Exception:
+        claimed = set()
+    if name in claimed:
+        return schemas.MetrikaMilestoneResponse(first=False)
+    claimed.add(name)
+    current_user.ym_milestones = _json.dumps(sorted(claimed))
+    db.commit()
+    return schemas.MetrikaMilestoneResponse(first=True)
+
+
 def _update_user_settings(updates: schemas.UserUpdateSettings, current_user: models.User, db: Session):
     """Общая логика обновления настроек пользователя."""
     fields = updates.model_fields_set
     if "username" in fields:
-        if updates.username is None:
-            current_user.username = None
-        else:
-            existing = db.query(models.User).filter(
-                models.User.username == updates.username,
-                models.User.id != current_user.id,
-            ).first()
-            if existing:
-                raise HTTPException(status_code=400, detail="Username already taken")
-            current_user.username = updates.username
+        # username — отображаемое имя, может повторяться; дубль не проверяем.
+        current_user.username = updates.username
     if "first_name" in fields:
         current_user.first_name = updates.first_name
     if "last_name" in fields:
@@ -862,6 +915,9 @@ def _delete_user_account_data(db: Session, user_id: uuid.UUID) -> None:
             synchronize_session=False
         )
         db.query(models.YandexGroups).filter(models.YandexGroups.client_id.in_(client_ids)).delete(
+            synchronize_session=False
+        )
+        db.query(models.YandexAds).filter(models.YandexAds.client_id.in_(client_ids)).delete(
             synchronize_session=False
         )
         db.query(models.VKStats).filter(models.VKStats.client_id.in_(client_ids)).delete(synchronize_session=False)

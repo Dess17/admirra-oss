@@ -10,6 +10,32 @@ from automation.request_queue import get_api_limiter
 
 logger = logging.getLogger(__name__)
 
+
+def organization_name_from_client(client: Dict[str, Any]) -> str:
+    """
+    ErirAttributes.Organization.Name из ответа Clients.get / AgencyClients.get.
+    Документация: https://yandex.ru/dev/direct/doc/ru/clients/get
+    """
+    erir = client.get("ErirAttributes") or {}
+    org = erir.get("Organization") or {}
+    return (org.get("Name") or "").strip()
+
+
+def cabinet_display_name(
+    organization_name: str,
+    client_info: str,
+    login: str,
+    fallback_prefix: str,
+) -> str:
+    """Имя кабинета: Organization.Name, иначе ClientInfo (где уместно), иначе login."""
+    if organization_name:
+        return organization_name
+    info = (client_info or "").strip()
+    if info:
+        return info
+    return f"{fallback_prefix} ({login})"
+
+
 class YandexDirectAPI:
     def __init__(self, access_token: str, client_login: str = None, finance_token: Optional[str] = None):
         """
@@ -676,7 +702,8 @@ class YandexDirectAPI:
         date_to: str,
         level: str = "campaign",
         campaign_ids: Optional[List[int]] = None,
-        max_retries: int = 5
+        max_retries: int = 5,
+        include_ad_conversions: bool = True
     ) -> List[Dict[str, Any]]:
         """
         Fetches a report from Yandex Direct API v5.
@@ -705,11 +732,12 @@ class YandexDirectAPI:
             field_names.insert(2, "Criteria")
             report_type = "CRITERIA_PERFORMANCE_REPORT"
         elif level == "group":
-            field_names.insert(2, "AdGroupName")
+            field_names = ["Date", "CampaignId", "CampaignName", "AdGroupId", "AdGroupName", "Impressions", "Clicks", "Cost", "Conversions"]
             report_type = "ADGROUP_PERFORMANCE_REPORT"
         elif level == "ad":
-            # Минимальный набор полей (Conversions может быть недоступен на уровне объявления)
-            field_names = ["Date", "CampaignId", "CampaignName", "AdId", "Impressions", "Clicks", "Cost"]
+            field_names = ["Date", "CampaignId", "CampaignName", "AdGroupId", "AdId", "Impressions", "Clicks", "Cost"]
+            if include_ad_conversions:
+                field_names.append("Conversions")
             report_type = "AD_PERFORMANCE_REPORT"
         else:
             report_type = "CAMPAIGN_PERFORMANCE_REPORT"
@@ -803,6 +831,18 @@ class YandexDirectAPI:
                     
                     # Raise specific exceptions for different error codes
                     if response.status_code == 400:
+                        if level == "ad" and include_ad_conversions:
+                            logger.warning(
+                                "Yandex AD report does not support Conversions for this account/report; retrying without conversions"
+                            )
+                            return await self.get_report(
+                                date_from,
+                                date_to,
+                                level=level,
+                                campaign_ids=campaign_ids,
+                                max_retries=max_retries,
+                                include_ad_conversions=False,
+                            )
                         raise ValueError(f"Bad request to Yandex API: {error_msg}")
                     elif response.status_code == 401:
                         raise PermissionError(f"Unauthorized access to Yandex API: {error_msg}")
@@ -835,27 +875,43 @@ class YandexDirectAPI:
             if len(cols[0]) == 10 and cols[0][4] == '-' and cols[0][7] == '-':
                 try:
                     if level == "ad":
-                        if len(cols) >= 7:
-                            imps = int(cols[4]) if cols[4].isdigit() else 0
-                            clicks = int(cols[5]) if cols[5].isdigit() else 0
+                        if len(cols) >= 8:
+                            imps = int(cols[5]) if cols[5].isdigit() else 0
+                            clicks = int(cols[6]) if cols[6].isdigit() else 0
                             results.append({
                                 "date": cols[0],
                                 "campaign_id": cols[1],
                                 "campaign_name": cols[2],
-                                "ad_id": cols[3],
+                                "group_id": cols[3] if cols[3] != "--" else None,
+                                "ad_id": cols[4] if cols[4] != "--" else None,
                                 "ad_group_name": "",
                                 "impressions": imps,
                                 "clicks": clicks,
-                                "cost": float(cols[6]) / 1000000 if cols[6].replace('.', '', 1).isdigit() else 0.0,
+                                "cost": float(cols[7]) / 1000000 if cols[7].replace('.', '', 1).isdigit() else 0.0,
                                 "ctr": round(clicks / imps * 100, 2) if imps else 0.0,
-                                "conversions": int(cols[7]) if len(cols) > 7 and cols[7].isdigit() else 0
+                                "conversions": int(cols[8]) if len(cols) > 8 and cols[8].isdigit() else 0,
+                                "conversions_attributed": len(cols) > 8,
                             })
-                    elif level in ["keyword", "group"]:
+                    elif level == "group":
+                        if len(cols) >= 9:
+                            results.append({
+                                "date": cols[0],
+                                "campaign_id": cols[1],
+                                "campaign_name": cols[2],
+                                "group_id": cols[3] if cols[3] != "--" else None,
+                                "name": cols[4],
+                                "impressions": int(cols[5]) if cols[5].isdigit() else 0,
+                                "clicks": int(cols[6]) if cols[6].isdigit() else 0,
+                                "cost": float(cols[7]) / 1000000 if cols[7].replace('.', '', 1).isdigit() else 0.0,
+                                "conversions": int(cols[8]) if cols[8].isdigit() else 0,
+                                "conversions_attributed": True,
+                            })
+                    elif level == "keyword":
                         if len(cols) >= 8: # These reports have 8 columns
                             results.append({
                                 "date": cols[0],
                                 "campaign_name": cols[3], # Index 3 is CampaignName
-                                "name": cols[2], # Index 2 is AdGroupName or Criteria
+                                "name": cols[2], # Index 2 is Criteria
                                 "impressions": int(cols[4]) if cols[4].isdigit() else 0,
                                 "clicks": int(cols[5]) if cols[5].isdigit() else 0,
                                 "cost": float(cols[6]) / 1000000 if cols[6].replace('.', '', 1).isdigit() else 0.0,
@@ -1439,6 +1495,59 @@ class YandexDirectAPI:
                 logger.debug(f"_get_ads_via_adgroups: {e}")
                 return []
 
+    async def get_ad_groups_for_campaigns(self, campaign_ids: List[int]) -> List[Dict[str, Any]]:
+        """
+        Return Direct ad groups for the selected campaigns using stable source IDs.
+        Used by dashboard drill-down as a catalog fallback when the report has no
+        rows for a group in the selected period.
+        """
+        if not campaign_ids:
+            return []
+
+        payload = {
+            "method": "get",
+            "params": {
+                "SelectionCriteria": {"CampaignIds": campaign_ids[:10]},
+                "FieldNames": ["Id", "CampaignId", "Name", "Status", "ServingStatus", "Type"],
+            },
+        }
+
+        async with httpx.AsyncClient() as client:
+            try:
+                data = None
+                for url in [self.adgroups_url_v501, self.adgroups_url]:
+                    response = await client.post(url, json=payload, headers=self.headers, timeout=60.0)
+                    if response.status_code != 200:
+                        continue
+                    candidate = response.json()
+                    if "error" in candidate:
+                        logger.debug(f"AdGroups.get catalog error ({url}): {candidate['error']}")
+                        continue
+                    if url == self.adgroups_url_v501 and not candidate.get("result", {}).get("AdGroups"):
+                        logger.info("AdGroups.get v501 returned 0 groups, trying v5")
+                        continue
+                    data = candidate
+                    break
+                if data is None:
+                    return []
+
+                result = []
+                for group in data.get("result", {}).get("AdGroups", []) or []:
+                    if not group.get("Id"):
+                        continue
+                    result.append({
+                        "Id": group.get("Id"),
+                        "CampaignId": group.get("CampaignId"),
+                        "Name": group.get("Name") or f"Группа {group.get('Id')}",
+                        "Status": group.get("Status"),
+                        "ServingStatus": group.get("ServingStatus"),
+                        "Type": group.get("Type"),
+                    })
+                return result
+            except Exception as e:
+                logger.warning(f"AdGroups.get catalog error: {e}")
+                return []
+
     async def get_ads_with_titles_and_images(
         self,
         campaign_ids: Optional[List[int]] = None,
@@ -1463,7 +1572,7 @@ class YandexDirectAPI:
             "method": "get",
             "params": {
                 "SelectionCriteria": criteria,
-                "FieldNames": ["Id", "CampaignId", "State", "Type"],
+                "FieldNames": ["Id", "CampaignId", "AdGroupId", "Status", "State", "Type"],
                 "TextAdFieldNames": ["Title", "Text", "AdImageHash"],
                 "TextImageAdFieldNames": ["AdImageHash", "Href"],
                 "DynamicTextAdFieldNames": ["AdImageHash", "Text"],
@@ -1505,16 +1614,18 @@ class YandexDirectAPI:
                 ads = data.get("result", {}).get("Ads", [])
                 if ad_group_ids and not ads:
                     logger.info(f"Ads.get by AdGroupIds: ad_group_ids={ad_group_ids[:5]}..., ads_count=0")
-                # Диагностика: при пустом Ads.get по CampaignIds — логируем типы кампаний и пробуем Creatives.get
+                # For drill-down we need real Ads with AdGroupId. If CampaignIds
+                # return nothing (Smart / unified campaigns), first go through
+                # AdGroups.get -> Ads.get by AdGroupIds. Creative-only fallback is
+                # useful for top creatives, but it cannot build a real hierarchy.
                 if not ads and campaign_ids and not ad_group_ids:
                     await self._log_campaign_types(campaign_ids[:10])
+                    logger.info(f"Ads.get: campaign_ids={campaign_ids}, ads_count=0, trying AdGroups+Ads path")
+                    ads = await self._get_ads_via_adgroups(campaign_ids)
+                if not ads and campaign_ids and not ad_group_ids:
                     creatives_from_api = await self._get_creatives_by_campaigns(campaign_ids[:10])
                     if creatives_from_api:
                         ads = creatives_from_api
-                # Fallback: Ads.get по CampaignIds пуст для Smart — пробуем AdGroups.get → Ads.get по AdGroupIds (v501)
-                if not ads and campaign_ids and not ad_group_ids:
-                    logger.info(f"Ads.get: campaign_ids={campaign_ids}, ads_count=0, trying AdGroups+Ads path")
-                    ads = await self._get_ads_via_adgroups(campaign_ids)
                 result = []
                 for ad in ads:
                     title = ad.get("Title")
@@ -1543,6 +1654,9 @@ class YandexDirectAPI:
                     result.append({
                         "Id": ad["Id"],
                         "CampaignId": ad["CampaignId"],
+                        "AdGroupId": ad.get("AdGroupId"),
+                        "Status": ad.get("Status"),
+                        "State": ad.get("State"),
                         "Title": (title or "")[:120],
                         "Text": (text or "")[:200],
                         "Type": ad_type,
@@ -1740,18 +1854,22 @@ class YandexDirectAPI:
                 logger.warning(f"⚠️ Error getting campaign goals, will use fallback method: {e}")
                 return {}
     
-    async def get_client_info_for_login(self, client_login: str) -> Optional[Dict[str, Any]]:
+    async def get_cabinet_profile_for_login(self, client_login: str) -> Optional[Dict[str, Any]]:
         """
-        Fetches ClientInfo (human-readable cabinet name) for a specific login.
-        Uses Client-Login header to request that cabinet's parameters.
+        Clients.get с заголовком Client-Login — параметры рекламодателя для выбранного кабинета.
+        Документация: https://yandex.ru/dev/direct/doc/ru/clients/get
+
+        ClientInfo/Login в ответе относятся к представителю, не к организации.
+        Для отображаемого имени кабинета используем OrganizationFieldNames: Name.
         """
         url = "https://api.direct.yandex.com/json/v5/clients"
         headers = {**self.headers, "Client-Login": client_login}
         payload = {
             "method": "get",
             "params": {
-                "FieldNames": ["Login", "ClientInfo"]
-            }
+                "FieldNames": ["Login", "ClientId", "Type"],
+                "OrganizationFieldNames": ["Name"],
+            },
         }
         async with httpx.AsyncClient() as client:
             try:
@@ -1760,21 +1878,41 @@ class YandexDirectAPI:
                     data = response.json()
                     if "result" in data and "Clients" in data["result"] and data["result"]["Clients"]:
                         c = data["result"]["Clients"][0]
-                        return {"Login": c.get("Login"), "ClientInfo": c.get("ClientInfo", "")}
+                        return {
+                            "login": client_login,
+                            "organization_name": organization_name_from_client(c),
+                            "client_id": c.get("ClientId"),
+                            "client_type": c.get("Type"),
+                        }
             except Exception as e:
-                logger.warning(f"Could not get ClientInfo for {client_login}: {e}")
+                logger.warning(f"Could not get cabinet profile for {client_login}: {e}")
         return None
+
+    async def get_client_info_for_login(self, client_login: str) -> Optional[Dict[str, Any]]:
+        """Обратная совместимость: см. get_cabinet_profile_for_login."""
+        profile = await self.get_cabinet_profile_for_login(client_login)
+        if not profile:
+            return None
+        return {
+            "Login": profile["login"],
+            "ClientInfo": profile.get("organization_name", ""),
+        }
 
     async def get_clients(self) -> List[Dict[str, Any]]:
         """
-        Fetches information about the current client, including ManagedLogins for shared access.
+        Clients.get — параметры рекламодателя и представителя (токена).
+        Документация: https://yandex.ru/dev/direct/doc/ru/clients/get
+
+        ManagedLogins не описан в FieldNames, но API возвращает его при запросе —
+        используем только как список логинов кабинетов с делегированным доступом.
         """
         url = "https://api.direct.yandex.com/json/v5/clients"
         payload = {
             "method": "get",
             "params": {
-                "FieldNames": ["Login", "ClientInfo", "ManagedLogins", "ClientId"]
-            }
+                "FieldNames": ["Login", "ClientInfo", "ClientId", "Type", "ManagedLogins"],
+                "OrganizationFieldNames": ["Name"],
+            },
         }
         async with httpx.AsyncClient() as client:
             try:

@@ -1,5 +1,5 @@
 from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from core import models
 from datetime import datetime, timedelta
 import uuid
@@ -192,6 +192,7 @@ class StatsService:
                 "cpa_available": True,
                 "goals_syncing": False,
                 "goals_sync_message": None,
+                "cost_by_platform": {"yandex": 0, "vk": 0, "avito": 0},
                 "trends": None
             }
 
@@ -543,6 +544,11 @@ class StatsService:
                 "imps": imps, 
                 "clks": clks, 
                 "convs": convs,
+                "cost_by_platform": {
+                    "yandex": round(yandex_cost, 2),
+                    "vk": round(vk_cost, 2),
+                    "avito": round(avito_cost, 2),
+                },
                 "avg_cpc": avg_cpc,  # Взвешенное среднее CPC
                 "avg_cpa": avg_cpa,  # Взвешенное среднее CPA
                 "leads_available": leads_available,
@@ -677,6 +683,7 @@ class StatsService:
                 "cpa_available": bool(curr.get("cpa_available", True)),
                 "goals_syncing": goals_syncing,
                 "goals_sync_message": "Данные целей ещё синхронизируются" if goals_syncing else None,
+                "cost_by_platform": curr.get("cost_by_platform", {"yandex": 0, "vk": 0, "avito": 0}),
                 "revenue": 0.0,
                 "profit": -round(curr["costs"], 2),
                 "roi": -100.0 if curr["costs"] > 0 else 0.0,
@@ -756,6 +763,7 @@ class StatsService:
             "cpa_available": bool(curr.get("cpa_available", True)),
             "goals_syncing": goals_syncing,
             "goals_sync_message": "Данные целей ещё синхронизируются" if goals_syncing else None,
+            "cost_by_platform": curr.get("cost_by_platform", {"yandex": 0, "vk": 0, "avito": 0}),
             "revenue": 0.0,  # Placeholder for future financial integration
             "profit": -round(curr["costs"], 2),
             "roi": -100.0 if curr["costs"] > 0 else 0.0,
@@ -770,7 +778,11 @@ class StatsService:
         d_end: datetime.date,
         platform: str = "all",
         campaign_ids: Optional[List[uuid.UUID]] = None,
-        vk_goal_action_ids: Optional[List[str]] = None
+        vk_goal_action_ids: Optional[List[str]] = None,
+        yandex_conversion_overrides: Optional[dict] = None,
+        yandex_prev_conversion_overrides: Optional[dict] = None,
+        avito_conversion_overrides: Optional[dict] = None,
+        avito_prev_conversion_overrides: Optional[dict] = None,
     ):
         if not client_ids:
             return []
@@ -818,7 +830,9 @@ class StatsService:
         def run_yandex_query(start, end):
             q = db.query(
                 models.Campaign.id.label("campaign_id"),
-                models.YandexStats.campaign_name,
+                models.Campaign.name.label("campaign_display_name"),
+                models.Campaign.external_id.label("campaign_external_id"),
+                func.max(models.YandexStats.campaign_name).label("campaign_name"),
                 func.sum(models.YandexStats.impressions).label("impressions"),
                 func.sum(models.YandexStats.clicks).label("clicks"),
                 func.sum(models.YandexStats.cost).label("cost"),
@@ -834,21 +848,7 @@ class StatsService:
                 q = q.filter(models.YandexStats.date >= start)
             if end:
                 q = q.filter(models.YandexStats.date <= end)
-            return q.group_by(models.Campaign.id, models.YandexStats.campaign_name).all()
-
-        def get_yandex_scope_cost(start, end):
-            q = db.query(
-                func.sum(models.YandexStats.cost)
-            ).join(models.Campaign, models.YandexStats.campaign_id == models.Campaign.id).filter(
-                models.YandexStats.client_id.in_(client_ids)
-            )
-            if integration_ids_filter:
-                q = q.filter(models.Campaign.integration_id.in_(integration_ids_filter))
-            if start:
-                q = q.filter(models.YandexStats.date >= start)
-            if end:
-                q = q.filter(models.YandexStats.date <= end)
-            return float((q.scalar() or 0) or 0)
+            return q.group_by(models.Campaign.id, models.Campaign.name, models.Campaign.external_id).all()
 
         def run_vk_query(start, end):
             q = db.query(
@@ -981,63 +981,163 @@ class StatsService:
                 m_q = m_q.filter(models.MetrikaGoals.date <= end)
             return int((m_q.scalar() or 0) or 0)
 
+        def allocate_metrika_convs(rows, total_convs, overrides, row_key_getter=lambda row: row.campaign_id):
+            overrides = overrides or {}
+            total = max(int(total_convs or 0), 0)
+            allocations = {}
+            remaining_rows = []
+            used_total = 0
+            for row in rows:
+                cid = str(row_key_getter(row) or "")
+                if cid in overrides:
+                    value = int(overrides.get(cid) or 0)
+                    allocations[cid] = value
+                    used_total += value
+                else:
+                    remaining_rows.append(row)
+
+            # Keep exact platform attribution even when the sum differs from
+            # the stored KPI total by a small residual. Falling back to cost
+            # allocation here makes campaign rows disagree with drill-down
+            # rows that are also exact Metrika attribution.
+            remaining_total = max(total - used_total, 0)
+            if remaining_total > 0 and not remaining_rows:
+                # Some selected-goal visits may not be attributed by Metrika to
+                # a DirectClickOrder. Distribute that residual over visible
+                # campaigns so campaign totals still match KPI cards.
+                remaining_rows = list(rows)
+
+            if remaining_total <= 0 or not remaining_rows:
+                for row in remaining_rows:
+                    allocations.setdefault(str(row.campaign_id), 0)
+                return allocations
+
+            weights = [max(float(row.cost or 0), 0.0) for row in remaining_rows]
+            total_weight = sum(weights)
+            if total_weight <= 0:
+                for row in remaining_rows:
+                    allocations.setdefault(str(row.campaign_id), 0)
+                return allocations
+
+            raw_values = [remaining_total * weight / total_weight for weight in weights]
+            base_values = [int(value) for value in raw_values]
+            remainder = remaining_total - sum(base_values)
+            if remainder > 0:
+                order = sorted(
+                    range(len(remaining_rows)),
+                    key=lambda idx: (raw_values[idx] - base_values[idx], weights[idx]),
+                    reverse=True,
+                )
+                for idx in order[:remainder]:
+                    base_values[idx] += 1
+
+            for row, value in zip(remaining_rows, base_values):
+                cid = str(row_key_getter(row) or "")
+                allocations[cid] = int(allocations.get(cid, 0) or 0) + value
+            return allocations
+
         campaigns = []
 
         if platform in ["all", "yandex"]:
             y_results = run_yandex_query(d_start, d_end)
-            total_metrika_convs = get_metrika_convs(d_start, d_end)
-            total_yandex_cost = get_yandex_scope_cost(d_start, d_end)
+            y_group_campaign_rows_q = db.query(
+                models.YandexGroups.campaign_id,
+                models.YandexGroups.group_id,
+            ).filter(
+                models.YandexGroups.client_id.in_(client_ids),
+                models.YandexGroups.campaign_id.isnot(None),
+            )
+            if d_start:
+                y_group_campaign_rows_q = y_group_campaign_rows_q.filter(models.YandexGroups.date >= d_start)
+            if d_end:
+                y_group_campaign_rows_q = y_group_campaign_rows_q.filter(models.YandexGroups.date <= d_end)
+            y_group_campaign_ids = set()
+            y_group_any_campaign_ids = set()
+            for row in y_group_campaign_rows_q.distinct().all():
+                if not row or not row[0]:
+                    continue
+                cid = str(row[0])
+                group_id = str(row[1] or "").strip()
+                y_group_any_campaign_ids.add(cid)
+                if group_id and group_id != "--":
+                    y_group_campaign_ids.add(cid)
+            y_hierarchy_unavailable_campaign_ids = y_group_any_campaign_ids - y_group_campaign_ids
+            yandex_conversion_overrides = yandex_conversion_overrides or {}
+            yandex_prev_conversion_overrides = yandex_prev_conversion_overrides or {}
+            total_yandex_metrika_convs = get_metrika_convs(d_start, d_end)
+            yandex_conv_allocations = allocate_metrika_convs(
+                y_results,
+                total_yandex_metrika_convs,
+                yandex_conversion_overrides,
+            )
 
             # Previous period Yandex data keyed by campaign_id
             prev_y_rows = {}
-            prev_total_metrika_convs = 0
-            prev_total_yandex_cost = 0
+            prev_total_yandex_metrika_convs = 0
+            prev_yandex_conv_allocations = {}
             if prev_start is not None:
                 prev_y_list = run_yandex_query(prev_start, prev_end)
                 prev_y_rows = {str(r.campaign_id): r for r in prev_y_list}
-                prev_total_metrika_convs = get_metrika_convs(prev_start, prev_end)
-                prev_total_yandex_cost = get_yandex_scope_cost(prev_start, prev_end)
+                prev_total_yandex_metrika_convs = get_metrika_convs(prev_start, prev_end)
+                prev_yandex_conv_allocations = allocate_metrika_convs(
+                    prev_y_list,
+                    prev_total_yandex_metrika_convs,
+                    yandex_prev_conversion_overrides,
+                )
 
             for r in y_results:
                 cost = float(r.cost or 0)
                 clicks = int(r.clicks or 0)
                 imps = int(r.impressions or 0)
-                # CRITICAL: Конверсии Yandex — только из Метрики (пропорционально).
-                if total_metrika_convs > 0 and total_yandex_cost > 0:
-                    convs = round(total_metrika_convs * (cost / total_yandex_cost))
-                else:
-                    convs = 0
+                ctr = round(clicks / imps * 100, 2) if imps > 0 else 0
+                cid = str(r.campaign_id)
+                # Yandex leads/CPL must use selected Metrika goals. Direct
+                # conversions include all goals and inflate campaign/direction
+                # rows compared with KPI cards.
+                convs = int(yandex_conv_allocations.get(cid, 0) or 0)
                 cpc = round(cost / clicks, 2) if clicks > 0 else 0
                 cpa = round(cost / convs, 2) if convs > 0 else 0
 
                 # Previous period values for this campaign
-                cid = str(r.campaign_id)
                 p = prev_y_rows.get(cid)
                 if p:
                     prev_cost = float(p.cost or 0)
                     prev_clicks = int(p.clicks or 0)
                     prev_imps = int(p.impressions or 0)
-                    if prev_total_metrika_convs > 0 and prev_total_yandex_cost > 0:
-                        prev_convs = round(prev_total_metrika_convs * (prev_cost / prev_total_yandex_cost))
-                    else:
-                        prev_convs = 0
+                    prev_ctr = prev_clicks / prev_imps * 100 if prev_imps > 0 else 0
+                    prev_convs = int(prev_yandex_conv_allocations.get(cid, 0) or 0)
                     prev_cpc = prev_cost / prev_clicks if prev_clicks > 0 else 0
                     prev_cpa = prev_cost / prev_convs if prev_convs > 0 else 0
                 else:
-                    prev_cost = prev_clicks = prev_imps = prev_convs = prev_cpc = prev_cpa = 0
+                    prev_cost = prev_clicks = prev_imps = prev_ctr = prev_convs = prev_cpc = prev_cpa = 0
 
+                raw_name = (r.campaign_display_name or r.campaign_name or "").strip()
+                has_real_children = str(r.campaign_id) in y_group_campaign_ids
+                hierarchy_unavailable = str(r.campaign_id) in y_hierarchy_unavailable_campaign_ids
                 campaigns.append({
                     "id": cid,
-                    "name": f"[ЯД] {r.campaign_name}",
+                    "platform": "yandex",
+                    "level": "campaign",
+                    "source_id": getattr(r, "campaign_external_id", None),
+                    "has_children": has_real_children,
+                    "hierarchy_unavailable": hierarchy_unavailable,
+                    "hierarchy_unavailable_reason": (
+                        "API Яндекс Директа отдаёт статистику только на уровне кампании"
+                        if hierarchy_unavailable else None
+                    ),
+                    "conversions_attributed": True,
+                    "name": f"[ЯД] {raw_name or 'Без названия'}",
                     "impressions": imps,
                     "clicks": clicks,
                     "cost": round(cost, 2),
                     "conversions": convs,
+                    "ctr": ctr,
                     "cpc": cpc,
                     "cpa": cpa,
                     "trend_cost": calc_trend(cost, prev_cost),
                     "trend_impressions": calc_trend(imps, prev_imps),
                     "trend_clicks": calc_trend(clicks, prev_clicks),
+                    "trend_ctr": calc_trend(ctr, prev_ctr),
                     "trend_conversions": calc_trend(convs, prev_convs),
                     "trend_cpc": calc_trend(cpc, prev_cpc),
                     "trend_cpa": calc_trend(cpa, prev_cpa),
@@ -1056,6 +1156,7 @@ class StatsService:
                 clicks = int(r.clicks or 0)
                 convs = int(r.conversions or 0)
                 imps = int(r.impressions or 0)
+                ctr = round(clicks / imps * 100, 2) if imps > 0 else 0
                 cpc = round(cost / clicks, 2) if clicks > 0 else 0
                 cpa = round(cost / convs, 2) if convs > 0 else 0
 
@@ -1065,11 +1166,12 @@ class StatsService:
                     prev_cost = float(p.cost or 0)
                     prev_clicks = int(p.clicks or 0)
                     prev_imps = int(p.impressions or 0)
+                    prev_ctr = prev_clicks / prev_imps * 100 if prev_imps > 0 else 0
                     prev_convs = int(p.conversions or 0)
                     prev_cpc = prev_cost / prev_clicks if prev_clicks > 0 else 0
                     prev_cpa = prev_cost / prev_convs if prev_convs > 0 else 0
                 else:
-                    prev_cost = prev_clicks = prev_imps = prev_convs = prev_cpc = prev_cpa = 0
+                    prev_cost = prev_clicks = prev_imps = prev_ctr = prev_convs = prev_cpc = prev_cpa = 0
 
                 # Название: Campaign.name (из API); если "Campaign {id}" — показываем "Кампания (ID: X)"
                 raw = (r.campaign_display_name or r.campaign_name or "").strip()
@@ -1082,16 +1184,23 @@ class StatsService:
                     disp_name = raw or "Без названия"
                 campaigns.append({
                     "id": cid,
+                    "platform": "vk",
+                    "level": "campaign",
+                    "source_id": ext_id or None,
+                    "has_children": False,
+                    "conversions_attributed": True,
                     "name": f"[VK] {disp_name}",
                     "impressions": imps,
                     "clicks": clicks,
                     "cost": round(cost, 2),
                     "conversions": convs,
+                    "ctr": ctr,
                     "cpc": cpc,
                     "cpa": cpa,
                     "trend_cost": calc_trend(cost, prev_cost),
                     "trend_impressions": calc_trend(imps, prev_imps),
                     "trend_clicks": calc_trend(clicks, prev_clicks),
+                    "trend_ctr": calc_trend(ctr, prev_ctr),
                     "trend_conversions": calc_trend(convs, prev_convs),
                     "trend_cpc": calc_trend(cpc, prev_cpc),
                     "trend_cpa": calc_trend(cpa, prev_cpa),
@@ -1099,32 +1208,92 @@ class StatsService:
 
         if platform in ["all", "avito"]:
             av_results = run_avito_query(d_start, d_end)
+            avito_conversion_overrides = avito_conversion_overrides or {}
+            avito_prev_conversion_overrides = avito_prev_conversion_overrides or {}
+            avito_child_campaign_ids_q = db.query(models.AvitoGroups.campaign_id).filter(
+                models.AvitoGroups.client_id.in_(client_ids),
+                models.AvitoGroups.campaign_id.isnot(None),
+            )
+            if d_start:
+                avito_child_campaign_ids_q = avito_child_campaign_ids_q.filter(models.AvitoGroups.date >= d_start)
+            if d_end:
+                avito_child_campaign_ids_q = avito_child_campaign_ids_q.filter(models.AvitoGroups.date <= d_end)
+            avito_child_campaign_ids = {
+                str(row[0]) for row in avito_child_campaign_ids_q.distinct().all() if row and row[0]
+            }
+            avito_creative_campaign_ids_q = db.query(models.AvitoCreatives.campaign_id).filter(
+                models.AvitoCreatives.client_id.in_(client_ids),
+                models.AvitoCreatives.campaign_id.isnot(None),
+            )
+            if d_start:
+                avito_creative_campaign_ids_q = avito_creative_campaign_ids_q.filter(models.AvitoCreatives.date >= d_start)
+            if d_end:
+                avito_creative_campaign_ids_q = avito_creative_campaign_ids_q.filter(models.AvitoCreatives.date <= d_end)
+            avito_child_campaign_ids.update(
+                str(row[0]) for row in avito_creative_campaign_ids_q.distinct().all() if row and row[0]
+            )
             total_avito_metrika_convs = get_metrika_convs(
                 d_start,
                 d_end,
                 filter_by_campaign_integrations=False,
             )
             total_avito_cost = get_avito_scope_cost(d_start, d_end)
+            if avito_conversion_overrides:
+                avito_conv_allocations = {
+                    str(getattr(row, "campaign_external_id", None) or ""): int(
+                        avito_conversion_overrides.get(
+                            str(getattr(row, "campaign_external_id", None) or ""),
+                            0,
+                        )
+                        or 0
+                    )
+                    for row in av_results
+                }
+            else:
+                avito_conv_allocations = allocate_metrika_convs(
+                    av_results,
+                    total_avito_metrika_convs,
+                    {},
+                    lambda row: getattr(row, "campaign_external_id", None),
+                )
             prev_av_rows = {}
             prev_total_avito_metrika_convs = 0
             prev_total_avito_cost = 0
+            prev_avito_conv_allocations = {}
             if prev_start is not None:
-                prev_av_rows = {str(r.campaign_id): r for r in run_avito_query(prev_start, prev_end)}
+                prev_av_list = run_avito_query(prev_start, prev_end)
+                prev_av_rows = {str(r.campaign_id): r for r in prev_av_list}
                 prev_total_avito_metrika_convs = get_metrika_convs(
                     prev_start,
                     prev_end,
                     filter_by_campaign_integrations=False,
                 )
                 prev_total_avito_cost = get_avito_scope_cost(prev_start, prev_end)
+                if avito_prev_conversion_overrides:
+                    prev_avito_conv_allocations = {
+                        str(getattr(row, "campaign_external_id", None) or ""): int(
+                            avito_prev_conversion_overrides.get(
+                                str(getattr(row, "campaign_external_id", None) or ""),
+                                0,
+                            )
+                            or 0
+                        )
+                        for row in prev_av_list
+                    }
+                else:
+                    prev_avito_conv_allocations = allocate_metrika_convs(
+                        prev_av_list,
+                        prev_total_avito_metrika_convs,
+                        {},
+                        lambda row: getattr(row, "campaign_external_id", None),
+                    )
             for r in av_results:
                 cost = float(r.cost or 0)
                 clicks = int(r.clicks or 0)
-                convs = (
-                    round(total_avito_metrika_convs * (cost / total_avito_cost))
-                    if total_avito_metrika_convs > 0 and total_avito_cost > 0
-                    else int(r.conversions or 0)
-                )
+                ext_id = str(getattr(r, "campaign_external_id", None) or "")
+                convs = int(avito_conv_allocations.get(ext_id, 0) or 0)
                 imps = int(r.impressions or 0)
+                ctr = round(clicks / imps * 100, 2) if imps > 0 else 0
                 cpc = round(cost / clicks, 2) if clicks > 0 else 0
                 cpa = round(cost / convs, 2) if convs > 0 else 0
                 cid = str(r.campaign_id)
@@ -1133,17 +1302,14 @@ class StatsService:
                     prev_cost = float(p.cost or 0)
                     prev_clicks = int(p.clicks or 0)
                     prev_imps = int(p.impressions or 0)
-                    prev_convs = (
-                        round(prev_total_avito_metrika_convs * (prev_cost / prev_total_avito_cost))
-                        if prev_total_avito_metrika_convs > 0 and prev_total_avito_cost > 0
-                        else int(p.conversions or 0)
-                    )
+                    prev_ctr = prev_clicks / prev_imps * 100 if prev_imps > 0 else 0
+                    prev_ext_id = str(getattr(p, "campaign_external_id", None) or "")
+                    prev_convs = int(prev_avito_conv_allocations.get(prev_ext_id, 0) or 0)
                     prev_cpc = prev_cost / prev_clicks if prev_clicks > 0 else 0
                     prev_cpa = prev_cost / prev_convs if prev_convs > 0 else 0
                 else:
-                    prev_cost = prev_clicks = prev_imps = prev_convs = prev_cpc = prev_cpa = 0
+                    prev_cost = prev_clicks = prev_imps = prev_ctr = prev_convs = prev_cpc = prev_cpa = 0
                 raw = (r.campaign_display_name or r.campaign_name or "").strip()
-                ext_id = getattr(r, "campaign_external_id", None) or ""
                 if raw and not (raw.startswith("Campaign ") and raw.replace("Campaign ", "").strip().isdigit()):
                     disp_name = raw
                 elif ext_id:
@@ -1152,16 +1318,24 @@ class StatsService:
                     disp_name = raw or "Без названия"
                 campaigns.append({
                     "id": cid,
+                    "platform": "avito",
+                    "level": "campaign",
+                    "source_id": ext_id or None,
+                    "has_children": cid in avito_child_campaign_ids,
+                    "conversions_attributed": True,
+                    "conversions_estimated": bool(convs and not avito_conversion_overrides),
                     "name": f"[Avito] {disp_name}",
                     "impressions": imps,
                     "clicks": clicks,
                     "cost": round(cost, 2),
                     "conversions": convs,
+                    "ctr": ctr,
                     "cpc": cpc,
                     "cpa": cpa,
                     "trend_cost": calc_trend(cost, prev_cost),
                     "trend_impressions": calc_trend(imps, prev_imps),
                     "trend_clicks": calc_trend(clicks, prev_clicks),
+                    "trend_ctr": calc_trend(ctr, prev_ctr),
                     "trend_conversions": calc_trend(convs, prev_convs),
                     "trend_cpc": calc_trend(cpc, prev_cpc),
                     "trend_cpa": calc_trend(cpa, prev_cpa),
@@ -1170,6 +1344,379 @@ class StatsService:
         # Сортировка: сначала по лидам (заявкам) desc, затем по расходу desc
         campaigns.sort(key=lambda x: (x["conversions"], x["cost"]), reverse=True)
         return campaigns
+
+    @staticmethod
+    def get_campaign_children(
+        db: Session,
+        client_ids: List[uuid.UUID],
+        campaign_id: uuid.UUID,
+        d_start: Optional[datetime.date],
+        d_end: datetime.date,
+        level: str = "campaign",
+        node_id: Optional[str] = None,
+        sort_by: str = "leads",
+        sort_dir: str = "desc",
+        conv_map: Optional[dict] = None,
+        conv_available: bool = False,
+    ):
+        if not client_ids:
+            return []
+
+        conv_map = conv_map or {}
+
+        def _norm_name(value):
+            return str(value or "").replace("\xa0", " ").strip().lower()
+
+        campaign = (
+            db.query(models.Campaign)
+            .join(models.Integration, models.Campaign.integration_id == models.Integration.id)
+            .filter(
+                models.Campaign.id == campaign_id,
+                models.Integration.client_id.in_(client_ids),
+            )
+            .first()
+        )
+        if not campaign or not campaign.integration:
+            return []
+
+        platform = campaign.integration.platform
+        if platform not in (models.IntegrationPlatform.YANDEX_DIRECT, models.IntegrationPlatform.AVITO_ADS):
+            return []
+        platform_code = "avito" if platform == models.IntegrationPlatform.AVITO_ADS else "yandex"
+
+        def _allocated_conversions_by_cost(total_conversions, rows, cost_getter):
+            total = int(round(float(total_conversions or 0)))
+            if total <= 0 or not rows:
+                return [0 for _ in rows]
+
+            weights = []
+            for row in rows:
+                try:
+                    weights.append(max(float(cost_getter(row) or 0), 0.0))
+                except Exception:
+                    weights.append(0.0)
+
+            total_weight = sum(weights)
+            if total_weight <= 0:
+                return [0 for _ in rows]
+
+            raw_values = [(total * weight / total_weight) for weight in weights]
+            allocated = [int(value) for value in raw_values]
+            remainder = total - sum(allocated)
+            if remainder > 0:
+                order = sorted(
+                    range(len(rows)),
+                    key=lambda idx: (raw_values[idx] - allocated[idx], weights[idx]),
+                    reverse=True,
+                )
+                for idx in order[:remainder]:
+                    allocated[idx] += 1
+            return allocated
+
+        campaign_conversion_total_cache = None
+
+        def _campaign_conversion_total():
+            nonlocal campaign_conversion_total_cache
+            if campaign_conversion_total_cache is not None:
+                return campaign_conversion_total_cache
+            rows = StatsService.get_campaign_stats(
+                db,
+                client_ids,
+                d_start,
+                d_end,
+                platform_code,
+                [campaign.id],
+                None,
+            )
+            for row in rows:
+                if str(row.get("id")) == str(campaign.id):
+                    campaign_conversion_total_cache = int(row.get("conversions") or 0)
+                    return campaign_conversion_total_cache
+            campaign_conversion_total_cache = 0
+            return campaign_conversion_total_cache
+
+        def metric_row(*, raw_id, name, parent_id=None, lvl="group", imps=0, clicks=0, cost=0, convs=0, has_children=False, attributed=True, estimated=False):
+            cost_val = float(cost or 0)
+            clicks_val = int(clicks or 0)
+            imps_val = int(imps or 0)
+            conv_val = int(convs or 0) if attributed or estimated else 0
+            return {
+                "id": str(raw_id or name or ""),
+                "parent_id": str(parent_id) if parent_id else None,
+                "platform": platform_code,
+                "level": lvl,
+                "source_id": str(raw_id) if raw_id else None,
+                "has_children": bool(has_children),
+                "conversions_attributed": bool(attributed),
+                "conversions_estimated": bool(estimated),
+                "name": name or ("Группа" if lvl == "group" else "Объявление"),
+                "impressions": imps_val,
+                "clicks": clicks_val,
+                "cost": round(cost_val, 2),
+                "conversions": conv_val,
+                "ctr": round(clicks_val / imps_val * 100, 2) if imps_val > 0 else 0,
+                "cpc": round(cost_val / clicks_val, 2) if clicks_val > 0 else 0,
+                "cpa": round(cost_val / conv_val, 2) if conv_val > 0 else 0,
+                "trend_cost": None,
+                "trend_impressions": None,
+                "trend_clicks": None,
+                "trend_ctr": None,
+                "trend_conversions": None,
+                "trend_cpc": None,
+                "trend_cpa": None,
+            }
+
+        def apply_dates(query, model):
+            if d_start:
+                query = query.filter(model.date >= d_start)
+            if d_end:
+                query = query.filter(model.date <= d_end)
+            return query
+
+        def sort_rows(rows):
+            sort_key = (sort_by or "leads").lower()
+            reverse = (sort_dir or "desc").lower() != "asc"
+
+            def value(row):
+                if sort_key in ("cost", "expense", "expenses"):
+                    return float(row.get("cost") or 0)
+                if sort_key in ("cpa", "cpl"):
+                    cpa = row.get("cpa")
+                    return float(cpa) if cpa else float("inf")
+                return int(row.get("conversions") or 0)
+
+            if sort_key in ("leads", "conversions", "results") and rows and all(
+                row.get("conversions_attributed") is False for row in rows
+            ):
+                return sorted(rows, key=lambda row: float(row.get("cost") or 0), reverse=True)
+            sorted_rows = sorted(rows, key=value, reverse=reverse)
+            if sort_key in ("cpa", "cpl") and reverse:
+                sorted_rows = sorted(rows, key=lambda r: (r.get("cpa") in (None, 0), float(r.get("cpa") or 0)))
+            return sorted_rows
+
+        if platform == models.IntegrationPlatform.AVITO_ADS:
+            if level == "campaign":
+                group_q = db.query(
+                    models.AvitoGroups.group_id,
+                    models.AvitoGroups.group_name,
+                    func.sum(models.AvitoGroups.impressions).label("impressions"),
+                    func.sum(models.AvitoGroups.clicks).label("clicks"),
+                    func.sum(models.AvitoGroups.cost).label("cost"),
+                ).filter(
+                    models.AvitoGroups.client_id.in_(client_ids),
+                    models.AvitoGroups.campaign_id == campaign.id,
+                    models.AvitoGroups.group_id.isnot(None),
+                )
+                group_q = apply_dates(group_q, models.AvitoGroups)
+                group_rows = group_q.group_by(models.AvitoGroups.group_id, models.AvitoGroups.group_name).all()
+                allocated_conversions = []
+                if not conv_available:
+                    allocated_conversions = _allocated_conversions_by_cost(
+                        _campaign_conversion_total(),
+                        group_rows,
+                        lambda item: item.cost,
+                    )
+                rows = []
+                for idx, row in enumerate(group_rows):
+                    if conv_available:
+                        convs = int(round(float(conv_map.get(str(row.group_id), 0) or 0)))
+                        estimated = False
+                    else:
+                        convs = allocated_conversions[idx]
+                        estimated = True
+                    rows.append(metric_row(
+                        raw_id=row.group_id,
+                        parent_id=str(campaign.id),
+                        name=row.group_name or f"Группа {row.group_id}",
+                        lvl="group",
+                        imps=row.impressions,
+                        clicks=row.clicks,
+                        cost=row.cost,
+                        convs=convs,
+                        has_children=bool(row.group_id),
+                        attributed=True,
+                        estimated=estimated,
+                    ))
+                return sort_rows(rows)
+
+            if level == "group" and node_id:
+                group_conversion_total = 0
+                if not conv_available:
+                    group_q = db.query(
+                        models.AvitoGroups.group_id,
+                        func.sum(models.AvitoGroups.cost).label("cost"),
+                    ).filter(
+                        models.AvitoGroups.client_id.in_(client_ids),
+                        models.AvitoGroups.campaign_id == campaign.id,
+                        models.AvitoGroups.group_id.isnot(None),
+                    )
+                    group_q = apply_dates(group_q, models.AvitoGroups)
+                    sibling_groups = group_q.group_by(models.AvitoGroups.group_id).all()
+                    group_allocations = _allocated_conversions_by_cost(
+                        _campaign_conversion_total(),
+                        sibling_groups,
+                        lambda item: item.cost,
+                    )
+                    for idx, group in enumerate(sibling_groups):
+                        if str(group.group_id) == str(node_id):
+                            group_conversion_total = group_allocations[idx]
+                            break
+
+                creative_q = db.query(
+                    models.AvitoCreatives.creative_id,
+                    models.AvitoCreatives.creative_name,
+                    func.sum(models.AvitoCreatives.impressions).label("impressions"),
+                    func.sum(models.AvitoCreatives.clicks).label("clicks"),
+                    func.sum(models.AvitoCreatives.cost).label("cost"),
+                ).filter(
+                    models.AvitoCreatives.client_id.in_(client_ids),
+                    models.AvitoCreatives.campaign_id == campaign.id,
+                    models.AvitoCreatives.creative_id.isnot(None),
+                    models.AvitoCreatives.group_id == node_id,
+                )
+                creative_q = apply_dates(creative_q, models.AvitoCreatives)
+                creative_rows = creative_q.group_by(
+                    models.AvitoCreatives.creative_id,
+                    models.AvitoCreatives.creative_name,
+                ).all()
+                allocated_conversions = []
+                if not conv_available:
+                    allocated_conversions = _allocated_conversions_by_cost(
+                        group_conversion_total,
+                        creative_rows,
+                        lambda item: item.cost,
+                    )
+                rows = []
+                for idx, row in enumerate(creative_rows):
+                    if conv_available:
+                        convs = int(round(float(conv_map.get(str(row.creative_id), 0) or 0)))
+                        estimated = False
+                    else:
+                        convs = allocated_conversions[idx]
+                        estimated = True
+                    rows.append(metric_row(
+                        raw_id=row.creative_id,
+                        parent_id=node_id,
+                        name=row.creative_name or f"Креатив {row.creative_id}",
+                        lvl="ad",
+                        imps=row.impressions,
+                        clicks=row.clicks,
+                        cost=row.cost,
+                        convs=convs,
+                        has_children=False,
+                        attributed=True,
+                        estimated=estimated,
+                    ))
+                return sort_rows(rows)
+
+            return []
+
+        if level == "campaign":
+            group_q = db.query(
+                models.YandexGroups.group_id,
+                func.max(models.YandexGroups.group_name).label("group_name"),
+                func.sum(models.YandexGroups.impressions).label("impressions"),
+                func.sum(models.YandexGroups.clicks).label("clicks"),
+                func.sum(models.YandexGroups.cost).label("cost"),
+            ).filter(
+                models.YandexGroups.client_id.in_(client_ids),
+                models.YandexGroups.campaign_id == campaign.id,
+            )
+            group_q = apply_dates(group_q, models.YandexGroups)
+            group_rows = group_q.group_by(models.YandexGroups.group_id).all()
+
+            rows = []
+            for row in group_rows:
+                group_id = str(row.group_id).strip() if row.group_id is not None else ""
+                is_master_aggregate = not group_id or group_id == "--"
+                raw_group_id = f"master:{campaign.id}" if is_master_aggregate else group_id
+                group_name = row.group_name
+                if is_master_aggregate and (not group_name or str(group_name).strip() == "--"):
+                    group_name = "Мастер кампаний"
+                if conv_available:
+                    conv_key = group_id if not is_master_aggregate else "__campaign_total__"
+                    g_convs = int(round(float(conv_map.get(conv_key, 0) or 0)))
+                    estimated = False
+                    attributed = True
+                else:
+                    g_convs = 0
+                    estimated = False
+                    attributed = False
+                rows.append(metric_row(
+                    raw_id=raw_group_id,
+                    parent_id=str(campaign.id),
+                    name=group_name,
+                    lvl="group",
+                    imps=row.impressions,
+                    clicks=row.clicks,
+                    cost=row.cost,
+                    convs=g_convs,
+                    has_children=bool(group_id and not is_master_aggregate),
+                    attributed=attributed,
+                    estimated=estimated,
+                ))
+            if conv_available and "__campaign_total__" in conv_map:
+                parent_total = int(round(float(conv_map.get("__campaign_total__", 0) or 0)))
+                visible_total = sum(int(row.get("conversions") or 0) for row in rows)
+                residual = parent_total - visible_total
+                if residual > 0:
+                    rows.append(metric_row(
+                        raw_id=f"unattributed:{campaign.id}",
+                        parent_id=str(campaign.id),
+                        name="Не распределено по группам",
+                        lvl="group",
+                        imps=0,
+                        clicks=0,
+                        cost=0,
+                        convs=residual,
+                        has_children=False,
+                        attributed=True,
+                        estimated=False,
+                    ))
+            return sort_rows(rows)
+
+        if level == "group" and node_id:
+            ad_q = db.query(
+                models.YandexAds.ad_id,
+                func.max(models.YandexAds.group_name).label("group_name"),
+                func.sum(models.YandexAds.impressions).label("impressions"),
+                func.sum(models.YandexAds.clicks).label("clicks"),
+                func.sum(models.YandexAds.cost).label("cost"),
+            ).filter(
+                models.YandexAds.client_id.in_(client_ids),
+                models.YandexAds.campaign_id == campaign.id,
+                models.YandexAds.ad_id.isnot(None),
+            )
+            ad_q = ad_q.filter(models.YandexAds.group_id == node_id)
+            ad_q = apply_dates(ad_q, models.YandexAds)
+            ad_rows = ad_q.group_by(models.YandexAds.ad_id).all()
+
+            rows = []
+            for row in ad_rows:
+                if conv_available:
+                    a_convs = int(round(float(conv_map.get(str(row.ad_id), 0) or 0)))
+                    estimated = False
+                    attributed = True
+                else:
+                    a_convs = 0
+                    estimated = False
+                    attributed = False
+                rows.append(metric_row(
+                    raw_id=row.ad_id,
+                    parent_id=node_id,
+                    name=f"Объявление {row.ad_id}",
+                    lvl="ad",
+                    imps=row.impressions,
+                    clicks=row.clicks,
+                    cost=row.cost,
+                    convs=a_convs,
+                    has_children=False,
+                    attributed=attributed,
+                    estimated=estimated,
+                ))
+            return sort_rows(rows)
+
+        return []
 
     @staticmethod
     def get_activity_by_weekday(
